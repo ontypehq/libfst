@@ -3,6 +3,7 @@ const libfst = @import("libfst");
 
 const W = libfst.TropicalWeight;
 const FrozenFst = libfst.Fst(W);
+const epsilon = libfst.epsilon;
 
 const CliError = error{
     InvalidArguments,
@@ -47,6 +48,18 @@ pub fn main() !void {
 
     var mutable = try libfst.io_text.readText(W, allocator, input_data);
     defer mutable.deinit();
+
+    // OpenFst byte-tokenized ATT uses labels in [0..255] with 0 as epsilon.
+    // libfst's string helpers and rewrite ops reserve 0 for epsilon and use
+    // byte+1 for concrete byte labels. Normalize imported arcs here so converted
+    // assets are interoperable with `fst_compile_string` / `fst_print_string`.
+    for (0..mutable.numStates()) |sid| {
+        const state: u32 = @intCast(sid);
+        for (mutable.arcsMut(state)) |*arc| {
+            if (arc.ilabel != epsilon) arc.ilabel += 1;
+            if (arc.olabel != epsilon) arc.olabel += 1;
+        }
+    }
 
     var frozen = try FrozenFst.fromMutable(allocator, &mutable);
     defer frozen.deinit();
