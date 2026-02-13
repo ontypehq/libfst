@@ -8,6 +8,15 @@ const epsilon = arc_mod.epsilon;
 const no_state = arc_mod.no_state;
 const Allocator = std.mem.Allocator;
 
+fn toWeight(comptime W: type, value: anytype) W {
+    const T = @TypeOf(value);
+    if (T == W) return value;
+    if (T == f64) return W.init(value);
+    if (T == f32) return W.init(@as(f64, value));
+    if (T == f16) return W.init(@as(f64, value));
+    @compileError("compose: unsupported arc weight type");
+}
+
 /// Compose two FSTs: result accepts string pairs (x, z) such that
 /// there exists y where (x, y) ∈ fst1 and (y, z) ∈ fst2.
 ///
@@ -16,7 +25,7 @@ const Allocator = std.mem.Allocator;
 ///   filter=0: both can match or fst1 consumes eps
 ///   filter=1: only fst2 can consume eps
 ///   filter=2: only fst1 can consume eps
-pub fn compose(comptime W: type, allocator: Allocator, fst1: *const mutable_fst_mod.MutableFst(W), fst2: *const mutable_fst_mod.MutableFst(W)) !mutable_fst_mod.MutableFst(W) {
+pub fn compose(comptime W: type, allocator: Allocator, fst1: anytype, fst2: anytype) !mutable_fst_mod.MutableFst(W) {
     const A = arc_mod.Arc(W);
 
     if (fst1.start() == no_state or fst2.start() == no_state) {
@@ -96,7 +105,7 @@ pub fn compose(comptime W: type, allocator: Allocator, fst1: *const mutable_fst_
                     try result.addArc(current, A.init(
                         a1.ilabel,
                         a2.olabel,
-                        W.times(a1.weight, a2.weight),
+                        W.times(toWeight(W, a1.weight), toWeight(W, a2.weight)),
                         ns,
                     ));
                 }
@@ -111,7 +120,7 @@ pub fn compose(comptime W: type, allocator: Allocator, fst1: *const mutable_fst_
                     const new_filter: u8 = if (t.filter == 0) 2 else t.filter;
                     const next = StateTuple{ .s1 = a1.nextstate, .s2 = t.s2, .filter = new_filter };
                     const ns = try getOrCreate(&result, &state_map, &queue, arena, next);
-                    try result.addArc(current, A.init(a1.ilabel, epsilon, a1.weight, ns));
+                    try result.addArc(current, A.init(a1.ilabel, epsilon, toWeight(W, a1.weight), ns));
                 }
             }
         }
@@ -123,7 +132,7 @@ pub fn compose(comptime W: type, allocator: Allocator, fst1: *const mutable_fst_
                     const new_filter: u8 = if (t.filter == 0) 1 else t.filter;
                     const next = StateTuple{ .s1 = t.s1, .s2 = a2.nextstate, .filter = new_filter };
                     const ns = try getOrCreate(&result, &state_map, &queue, arena, next);
-                    try result.addArc(current, A.init(epsilon, a2.olabel, a2.weight, ns));
+                    try result.addArc(current, A.init(epsilon, a2.olabel, toWeight(W, a2.weight), ns));
                 }
             }
         }
@@ -139,7 +148,7 @@ pub fn compose(comptime W: type, allocator: Allocator, fst1: *const mutable_fst_
                     try result.addArc(current, A.init(
                         a1.ilabel,
                         a2.olabel,
-                        W.times(a1.weight, a2.weight),
+                        W.times(toWeight(W, a1.weight), toWeight(W, a2.weight)),
                         ns,
                     ));
                 }

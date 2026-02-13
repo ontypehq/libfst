@@ -90,6 +90,7 @@ FstError fst_save(FstHandle handle, const char* path);
 
 /* --- Operations (MutableFst -> MutableFst) --- */
 FstMutableHandle fst_compose(FstMutableHandle a, FstMutableHandle b);
+FstMutableHandle fst_compose_frozen(FstMutableHandle a, FstHandle b);
 FstMutableHandle fst_determinize(FstMutableHandle handle);
 FstError fst_minimize(FstMutableHandle handle);
 FstMutableHandle fst_rm_epsilon(FstMutableHandle handle);

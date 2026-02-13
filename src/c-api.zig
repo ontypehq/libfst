@@ -345,6 +345,17 @@ export fn fst_compose(a_handle: u32, b_handle: u32) callconv(.c) u32 {
     return h;
 }
 
+export fn fst_compose_frozen(a_handle: u32, b_handle: u32) callconv(.c) u32 {
+    api_mutex.lock();
+    defer api_mutex.unlock();
+    const ha = mutable_table.getConst(a_handle) orelse return invalid_handle;
+    const hb = fst_table.getConst(b_handle) orelse return invalid_handle;
+    var result = compose_mod.compose(W, alloc, ha, hb) catch return invalid_handle;
+    const h = newMutableHandle(result);
+    if (h == invalid_handle) result.deinit();
+    return h;
+}
+
 export fn fst_determinize(handle: u32) callconv(.c) u32 {
     api_mutex.lock();
     defer api_mutex.unlock();
