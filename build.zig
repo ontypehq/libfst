@@ -77,4 +77,21 @@ pub fn build(b: *std.Build) void {
     const run_fuzz_tests = b.addRunArtifact(fuzz_tests);
     const fuzz_step = b.step("fuzz", "Run fuzz test harness");
     fuzz_step.dependOn(&run_fuzz_tests.step);
+
+    // Tool: convert OpenFst AT&T text to libfst binary
+    const att2lfst_module = b.createModule(.{
+        .root_source_file = b.path("src/tools/att2lfst.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    att2lfst_module.addImport("libfst", root_module);
+
+    const att2lfst_exe = b.addExecutable(.{
+        .name = "att2lfst",
+        .root_module = att2lfst_module,
+    });
+    b.installArtifact(att2lfst_exe);
+
+    const att2lfst_step = b.step("att2lfst", "Build att2lfst converter tool");
+    att2lfst_step.dependOn(&att2lfst_exe.step);
 }

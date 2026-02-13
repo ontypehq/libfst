@@ -77,6 +77,7 @@ zig build test         # unit tests
 zig build prop         # property-based tests (semiring laws, idempotency)
 zig build fuzz         # fuzz test harness
 zig build diff         # diff tests vs Pynini golden outputs (needs corpus)
+zig build att2lfst     # build converter at zig-out/bin/att2lfst
 ```
 
 To generate golden corpus for diff tests:
@@ -107,6 +108,40 @@ Labels: `u32` (0 = epsilon). StateId: `u32` (maxInt = no_state sentinel).
   then taking `shortest_path(n=1)` on projected output.
 - To avoid ambiguous weighted preference inversions, `cdrewrite` currently
   **rejects weighted rule/context FSTs** (`tau`, `lambda`, `rho` must be unit-weight).
+
+## WeTextProcessing Conversion
+
+For OnType integration, a pragmatic path is:
+1. Keep WeText/OpenFst assets as source of truth (`*_tagger.fst`, `*_verbalizer.fst`)
+2. Convert them offline into libfst binary format
+3. Load only libfst binaries at runtime
+
+### Option A: one-shot converter script
+
+```bash
+tools/convert_wetext_fst.sh zh_itn_tagger.fst zh_itn_tagger.libfst.fst
+tools/convert_wetext_fst.sh zh_itn_verbalizer.fst zh_itn_verbalizer.libfst.fst
+```
+
+Requires `fstprint` (OpenFst CLI) and `zig`.
+
+### Option A2: batch convert a directory (Python)
+
+```bash
+python3 tools/convert_wetext_dir.py \
+  --input-dir /path/to/wetext/itn \
+  --output-dir /path/to/libfst-assets
+```
+
+By default it converts `*_tagger.fst` and `*_verbalizer.fst`.
+
+### Option B: explicit two-step conversion
+
+```bash
+fstprint zh_itn_tagger.fst > /tmp/zh_itn_tagger.att
+zig build att2lfst
+./zig-out/bin/att2lfst --input /tmp/zh_itn_tagger.att --output zh_itn_tagger.libfst.fst
+```
 
 ## License
 
