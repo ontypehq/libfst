@@ -117,4 +117,24 @@ pub fn build(b: *std.Build) void {
 
     const att2lfst_step = b.step("att2lfst", "Build att2lfst converter tool");
     att2lfst_step.dependOn(&att2lfst_exe.step);
+
+    const bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/optimize-bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_module.addImport("libfst", root_module);
+
+    const bench_exe = b.addExecutable(.{
+        .name = "optimize-bench",
+        .root_module = bench_module,
+    });
+    b.installArtifact(bench_exe);
+
+    const run_bench = b.addRunArtifact(bench_exe);
+    if (b.args) |args| {
+        run_bench.addArgs(args);
+    }
+    const bench_step = b.step("bench", "Run profile-friendly FST benchmarks");
+    bench_step.dependOn(&run_bench.step);
 }

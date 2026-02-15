@@ -39,6 +39,7 @@ fn HandleTable(comptime T: type) type {
     return struct {
         slots: std.ArrayList(?*T) = .empty,
         free_list: std.ArrayList(u32) = .empty,
+        generations: std.ArrayList(u32) = .empty,
 
         const Self = @This();
 
@@ -46,10 +47,16 @@ fn HandleTable(comptime T: type) type {
         fn insert(self: *Self, ptr: *T) u32 {
             if (self.free_list.items.len > 0) {
                 const idx = self.free_list.pop().?;
+                self.generations.items[idx] +%= 1;
+                if (self.generations.items[idx] == 0) self.generations.items[idx] = 1;
                 self.slots.items[idx] = ptr;
                 return idx;
             }
             self.slots.append(alloc, ptr) catch return invalid_handle;
+            self.generations.append(alloc, 1) catch {
+                _ = self.slots.pop();
+                return invalid_handle;
+            };
             return @intCast(self.slots.items.len - 1);
         }
 
@@ -65,6 +72,20 @@ fn HandleTable(comptime T: type) type {
             return self.slots.items[handle];
         }
 
+        /// Caller MUST hold `api_mutex`.
+        fn generation(self: *Self, handle: u32) ?u32 {
+            if (handle >= self.generations.items.len) return null;
+            return self.generations.items[handle];
+        }
+
+        /// Caller MUST hold `api_mutex`.
+        fn bumpGeneration(self: *Self, handle: u32) bool {
+            if (handle >= self.generations.items.len) return false;
+            self.generations.items[handle] +%= 1;
+            if (self.generations.items[handle] == 0) self.generations.items[handle] = 1;
+            return true;
+        }
+
         /// Remove and destroy the object. Caller MUST hold `api_mutex`.
         fn remove(self: *Self, handle: u32, deinit_fn: *const fn (*T) void) bool {
             if (handle >= self.slots.items.len) return false;
@@ -72,6 +93,7 @@ fn HandleTable(comptime T: type) type {
             deinit_fn(ptr);
             alloc.destroy(ptr);
             self.slots.items[handle] = null;
+            _ = self.bumpGeneration(handle);
             self.free_list.append(alloc, handle) catch {};
             return true;
         }
@@ -84,10 +106,8 @@ const Fst = fst_mod.Fst(W);
 var mutable_table: HandleTable(MutableFst) = .{};
 var fst_table: HandleTable(Fst) = .{};
 
-/// Single global mutex protecting ALL handle table access and the pointed-to
-/// objects. Every C API entry point locks this for its entire duration, so
-/// pointers obtained from get()/getConst() remain valid until the export
-/// function returns and unlocks.
+/// Global mutex protects handle tables and short critical sections.
+/// Heavy algorithms run outside this lock using copied snapshots.
 var api_mutex: std.Thread.Mutex = .{};
 
 fn mutableDeinit(ptr: *MutableFst) void {
@@ -114,6 +134,7 @@ export fn fst_teardown() callconv(.c) void {
     }
     mutable_table.slots.deinit(alloc);
     mutable_table.free_list.deinit(alloc);
+    mutable_table.generations.deinit(alloc);
     mutable_table = .{};
 
     // Free all remaining frozen FSTs
@@ -126,6 +147,7 @@ export fn fst_teardown() callconv(.c) void {
     }
     fst_table.slots.deinit(alloc);
     fst_table.free_list.deinit(alloc);
+    fst_table.generations.deinit(alloc);
     fst_table = .{};
 }
 
@@ -155,6 +177,42 @@ fn newFstHandle(fst: Fst) u32 {
     return h;
 }
 
+fn cloneFstOwned(src: *const Fst) !Fst {
+    const bytes = try alloc.alignedAlloc(u8, .@"8", src.bytes.len);
+    errdefer alloc.free(bytes);
+    @memcpy(bytes, src.bytes);
+    var cloned = try Fst.fromBytes(bytes);
+    cloned.source = .owned;
+    cloned.allocator = alloc;
+    return cloned;
+}
+
+fn cloneMutableOwned(src: *const MutableFst) !MutableFst {
+    return src.clone(alloc);
+}
+
+fn loadOpenFstViaFstPrint(path: []const u8) !Fst {
+    const argv = [_][]const u8{ "fstprint", path };
+    const result = try std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &argv,
+        .max_output_bytes = 512 * 1024 * 1024,
+    });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| {
+            if (code != 0) return error.ExternalToolFailed;
+        },
+        else => return error.ExternalToolFailed,
+    }
+
+    var mutable = try io_text.readText(W, alloc, result.stdout);
+    defer mutable.deinit();
+    return try Fst.fromMutable(alloc, &mutable);
+}
+
 // ── Error codes ──
 
 pub const FstError = enum(c_int) {
@@ -180,6 +238,27 @@ export fn fst_mutable_new() callconv(.c) u32 {
     api_mutex.lock();
     defer api_mutex.unlock();
     return newMutableHandle(MutableFst.init(alloc));
+}
+
+export fn fst_mutable_clone(handle: u32) callconv(.c) u32 {
+    api_mutex.lock();
+    const h = mutable_table.getConst(handle) orelse {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var cloned = cloneMutableOwned(h) catch {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    api_mutex.unlock();
+
+    api_mutex.lock();
+    const rh = newMutableHandle(cloned);
+    api_mutex.unlock();
+    if (rh == invalid_handle) {
+        cloned.deinit();
+    }
+    return rh;
 }
 
 export fn fst_mutable_free(handle: u32) callconv(.c) void {
@@ -227,13 +306,22 @@ export fn fst_mutable_add_arc(handle: u32, src: u32, ilabel: u32, olabel: u32, w
 
 export fn fst_freeze(mutable_handle: u32) callconv(.c) u32 {
     api_mutex.lock();
-    defer api_mutex.unlock();
-    const mh = mutable_table.get(mutable_handle) orelse return invalid_handle;
-    var frozen = Fst.fromMutable(alloc, mh) catch return invalid_handle;
+    const mh = mutable_table.getConst(mutable_handle) orelse {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var snapshot = mh.clone(alloc) catch {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    api_mutex.unlock();
+    defer snapshot.deinit();
+
+    var frozen = Fst.fromMutable(alloc, &snapshot) catch return invalid_handle;
+    api_mutex.lock();
     const h = newFstHandle(frozen);
-    if (h == invalid_handle) {
-        frozen.deinit();
-    }
+    api_mutex.unlock();
+    if (h == invalid_handle) frozen.deinit();
     return h;
 }
 
@@ -298,8 +386,6 @@ export fn fst_get_arcs(handle: u32, state: u32, buf: ?[*]CFstArc, buf_len: u32) 
 // ── I/O ──
 
 export fn fst_read_text(path: ?[*:0]const u8) callconv(.c) u32 {
-    api_mutex.lock();
-    defer api_mutex.unlock();
     const p = path orelse return invalid_handle;
     const file = std.fs.cwd().openFileZ(p, .{}) catch return invalid_handle;
     defer file.close();
@@ -308,27 +394,50 @@ export fn fst_read_text(path: ?[*:0]const u8) callconv(.c) u32 {
     defer alloc.free(content);
 
     var fst = io_text.readText(W, alloc, content) catch return invalid_handle;
+    api_mutex.lock();
     const h = newMutableHandle(fst);
+    api_mutex.unlock();
     if (h == invalid_handle) fst.deinit();
     return h;
 }
 
 export fn fst_load(path: ?[*:0]const u8) callconv(.c) u32 {
-    api_mutex.lock();
-    defer api_mutex.unlock();
     const p = path orelse return invalid_handle;
-    var fst = io_binary.readBinary(W, alloc, std.mem.span(p)) catch return invalid_handle;
+    const slice = std.mem.span(p);
+    var fst = io_binary.readBinary(W, alloc, slice) catch return invalid_handle;
+    api_mutex.lock();
     const h = newFstHandle(fst);
+    api_mutex.unlock();
+    if (h == invalid_handle) fst.deinit();
+    return h;
+}
+
+export fn fst_load_openfst(path: ?[*:0]const u8) callconv(.c) u32 {
+    const p = path orelse return invalid_handle;
+    const slice = std.mem.span(p);
+    var fst = loadOpenFstViaFstPrint(slice) catch return invalid_handle;
+    api_mutex.lock();
+    const h = newFstHandle(fst);
+    api_mutex.unlock();
     if (h == invalid_handle) fst.deinit();
     return h;
 }
 
 export fn fst_save(handle: u32, path: ?[*:0]const u8) callconv(.c) FstError {
-    api_mutex.lock();
-    defer api_mutex.unlock();
-    const h = fst_table.getConst(handle) orelse return .invalid_arg;
     const p = path orelse return .invalid_arg;
-    io_binary.writeBinary(W, h, std.mem.span(p)) catch return .io_error;
+    api_mutex.lock();
+    const h = fst_table.getConst(handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    var snapshot = cloneFstOwned(h) catch {
+        api_mutex.unlock();
+        return .oom;
+    };
+    api_mutex.unlock();
+    defer snapshot.deinit();
+
+    io_binary.writeBinary(W, &snapshot, std.mem.span(p)) catch return .io_error;
     return .ok;
 }
 
@@ -336,172 +445,585 @@ export fn fst_save(handle: u32, path: ?[*:0]const u8) callconv(.c) FstError {
 
 export fn fst_compose(a_handle: u32, b_handle: u32) callconv(.c) u32 {
     api_mutex.lock();
-    defer api_mutex.unlock();
-    const ha = mutable_table.getConst(a_handle) orelse return invalid_handle;
-    const hb = mutable_table.getConst(b_handle) orelse return invalid_handle;
-    var result = compose_mod.compose(W, alloc, ha, hb) catch return invalid_handle;
+    const ha = mutable_table.getConst(a_handle) orelse {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var a_snapshot = cloneMutableOwned(ha) catch {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    const hb = mutable_table.getConst(b_handle) orelse {
+        a_snapshot.deinit();
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var b_snapshot = cloneMutableOwned(hb) catch {
+        a_snapshot.deinit();
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    api_mutex.unlock();
+    defer a_snapshot.deinit();
+    defer b_snapshot.deinit();
+
+    var result = compose_mod.compose(W, alloc, &a_snapshot, &b_snapshot) catch return invalid_handle;
+    api_mutex.lock();
     const h = newMutableHandle(result);
+    api_mutex.unlock();
     if (h == invalid_handle) result.deinit();
     return h;
 }
 
 export fn fst_compose_frozen(a_handle: u32, b_handle: u32) callconv(.c) u32 {
     api_mutex.lock();
-    defer api_mutex.unlock();
-    const ha = mutable_table.getConst(a_handle) orelse return invalid_handle;
-    const hb = fst_table.getConst(b_handle) orelse return invalid_handle;
-    var result = compose_mod.compose(W, alloc, ha, hb) catch return invalid_handle;
+    const ha = mutable_table.getConst(a_handle) orelse {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var a_snapshot = cloneMutableOwned(ha) catch {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    const hb = fst_table.getConst(b_handle) orelse {
+        a_snapshot.deinit();
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var b_snapshot = cloneFstOwned(hb) catch {
+        a_snapshot.deinit();
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    api_mutex.unlock();
+    defer a_snapshot.deinit();
+    defer b_snapshot.deinit();
+
+    var result = compose_mod.compose(W, alloc, &a_snapshot, &b_snapshot) catch return invalid_handle;
+    api_mutex.lock();
     const h = newMutableHandle(result);
+    api_mutex.unlock();
     if (h == invalid_handle) result.deinit();
     return h;
 }
 
 export fn fst_determinize(handle: u32) callconv(.c) u32 {
     api_mutex.lock();
-    defer api_mutex.unlock();
-    const h = mutable_table.getConst(handle) orelse return invalid_handle;
-    var result = determinize_mod.determinize(W, alloc, h) catch return invalid_handle;
+    const h = mutable_table.getConst(handle) orelse {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var snapshot = cloneMutableOwned(h) catch {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    api_mutex.unlock();
+    defer snapshot.deinit();
+
+    var result = determinize_mod.determinize(W, alloc, &snapshot) catch return invalid_handle;
+    api_mutex.lock();
     const rh = newMutableHandle(result);
+    api_mutex.unlock();
     if (rh == invalid_handle) result.deinit();
     return rh;
 }
 
 export fn fst_minimize(handle: u32) callconv(.c) FstError {
     api_mutex.lock();
-    defer api_mutex.unlock();
-    const h = mutable_table.get(handle) orelse return .invalid_arg;
-    minimize_mod.minimize(W, alloc, h) catch return .oom;
+    const h = mutable_table.getConst(handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    const expect_generation = mutable_table.generation(handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    var snapshot = cloneMutableOwned(h) catch {
+        api_mutex.unlock();
+        return .oom;
+    };
+    api_mutex.unlock();
+
+    var keep_snapshot = true;
+    defer if (keep_snapshot) snapshot.deinit();
+    minimize_mod.minimize(W, alloc, &snapshot) catch return .oom;
+
+    api_mutex.lock();
+    const dst = mutable_table.get(handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    const current_generation = mutable_table.generation(handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    if (current_generation != expect_generation) {
+        api_mutex.unlock();
+        return .invalid_arg;
+    }
+    var old = dst.*;
+    dst.* = snapshot;
+    keep_snapshot = false;
+    _ = mutable_table.bumpGeneration(handle);
+    api_mutex.unlock();
+    old.deinit();
     return .ok;
 }
 
 export fn fst_rm_epsilon(handle: u32) callconv(.c) u32 {
     api_mutex.lock();
-    defer api_mutex.unlock();
-    const h = mutable_table.getConst(handle) orelse return invalid_handle;
-    var result = rm_epsilon_mod.rmEpsilon(W, alloc, h) catch return invalid_handle;
+    const h = mutable_table.getConst(handle) orelse {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var snapshot = cloneMutableOwned(h) catch {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    api_mutex.unlock();
+    defer snapshot.deinit();
+
+    var result = rm_epsilon_mod.rmEpsilon(W, alloc, &snapshot) catch return invalid_handle;
+    api_mutex.lock();
     const rh = newMutableHandle(result);
+    api_mutex.unlock();
     if (rh == invalid_handle) result.deinit();
     return rh;
 }
 
 export fn fst_shortest_path(handle: u32, n: u32) callconv(.c) u32 {
     api_mutex.lock();
-    defer api_mutex.unlock();
-    const h = mutable_table.getConst(handle) orelse return invalid_handle;
-    var result = shortest_path_mod.shortestPath(W, alloc, h, n) catch return invalid_handle;
+    const h = mutable_table.getConst(handle) orelse {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var snapshot = cloneMutableOwned(h) catch {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    api_mutex.unlock();
+    defer snapshot.deinit();
+
+    var result = shortest_path_mod.shortestPath(W, alloc, &snapshot, n) catch return invalid_handle;
+    api_mutex.lock();
     const rh = newMutableHandle(result);
+    api_mutex.unlock();
     if (rh == invalid_handle) result.deinit();
     return rh;
 }
 
 export fn fst_union(a_handle: u32, b_handle: u32) callconv(.c) FstError {
     api_mutex.lock();
-    defer api_mutex.unlock();
-    const ha = mutable_table.get(a_handle) orelse return .invalid_arg;
-    const hb = mutable_table.getConst(b_handle) orelse return .invalid_arg;
-    union_mod.union_(W, ha, hb) catch return .oom;
+    const ha = mutable_table.getConst(a_handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    const expect_generation = mutable_table.generation(a_handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    var a_snapshot = cloneMutableOwned(ha) catch {
+        api_mutex.unlock();
+        return .oom;
+    };
+    const hb = mutable_table.getConst(b_handle) orelse {
+        a_snapshot.deinit();
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    var b_snapshot = cloneMutableOwned(hb) catch {
+        a_snapshot.deinit();
+        api_mutex.unlock();
+        return .oom;
+    };
+    api_mutex.unlock();
+
+    var keep_a_snapshot = true;
+    defer if (keep_a_snapshot) a_snapshot.deinit();
+    defer b_snapshot.deinit();
+    union_mod.union_(W, &a_snapshot, &b_snapshot) catch return .oom;
+
+    api_mutex.lock();
+    const dst = mutable_table.get(a_handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    const current_generation = mutable_table.generation(a_handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    if (current_generation != expect_generation) {
+        api_mutex.unlock();
+        return .invalid_arg;
+    }
+    var old = dst.*;
+    dst.* = a_snapshot;
+    keep_a_snapshot = false;
+    _ = mutable_table.bumpGeneration(a_handle);
+    api_mutex.unlock();
+    old.deinit();
     return .ok;
 }
 
 export fn fst_concat(a_handle: u32, b_handle: u32) callconv(.c) FstError {
     api_mutex.lock();
-    defer api_mutex.unlock();
-    const ha = mutable_table.get(a_handle) orelse return .invalid_arg;
-    const hb = mutable_table.getConst(b_handle) orelse return .invalid_arg;
-    concat_mod.concat(W, ha, hb) catch return .oom;
+    const ha = mutable_table.getConst(a_handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    const expect_generation = mutable_table.generation(a_handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    var a_snapshot = cloneMutableOwned(ha) catch {
+        api_mutex.unlock();
+        return .oom;
+    };
+    const hb = mutable_table.getConst(b_handle) orelse {
+        a_snapshot.deinit();
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    var b_snapshot = cloneMutableOwned(hb) catch {
+        a_snapshot.deinit();
+        api_mutex.unlock();
+        return .oom;
+    };
+    api_mutex.unlock();
+
+    var keep_a_snapshot = true;
+    defer if (keep_a_snapshot) a_snapshot.deinit();
+    defer b_snapshot.deinit();
+    concat_mod.concat(W, &a_snapshot, &b_snapshot) catch return .oom;
+
+    api_mutex.lock();
+    const dst = mutable_table.get(a_handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    const current_generation = mutable_table.generation(a_handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    if (current_generation != expect_generation) {
+        api_mutex.unlock();
+        return .invalid_arg;
+    }
+    var old = dst.*;
+    dst.* = a_snapshot;
+    keep_a_snapshot = false;
+    _ = mutable_table.bumpGeneration(a_handle);
+    api_mutex.unlock();
+    old.deinit();
     return .ok;
 }
 
 export fn fst_closure(handle: u32, closure_type: c_int) callconv(.c) FstError {
-    api_mutex.lock();
-    defer api_mutex.unlock();
-    const h = mutable_table.get(handle) orelse return .invalid_arg;
     const ct: closure_mod.ClosureType = switch (closure_type) {
         0 => .star,
         1 => .plus,
         2 => .ques,
         else => return .invalid_arg,
     };
-    closure_mod.closure(W, h, ct) catch return .oom;
+
+    api_mutex.lock();
+    const h = mutable_table.getConst(handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    const expect_generation = mutable_table.generation(handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    var snapshot = cloneMutableOwned(h) catch {
+        api_mutex.unlock();
+        return .oom;
+    };
+    api_mutex.unlock();
+
+    var keep_snapshot = true;
+    defer if (keep_snapshot) snapshot.deinit();
+    closure_mod.closure(W, &snapshot, ct) catch return .oom;
+
+    api_mutex.lock();
+    const dst = mutable_table.get(handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    const current_generation = mutable_table.generation(handle) orelse {
+        api_mutex.unlock();
+        return .invalid_arg;
+    };
+    if (current_generation != expect_generation) {
+        api_mutex.unlock();
+        return .invalid_arg;
+    }
+    var old = dst.*;
+    dst.* = snapshot;
+    keep_snapshot = false;
+    _ = mutable_table.bumpGeneration(handle);
+    api_mutex.unlock();
+    old.deinit();
     return .ok;
 }
 
 export fn fst_invert(handle: u32) callconv(.c) void {
     api_mutex.lock();
-    defer api_mutex.unlock();
-    if (mutable_table.get(handle)) |h| {
-        invert_mod.invert(W, h);
+    const h = mutable_table.getConst(handle) orelse {
+        api_mutex.unlock();
+        return;
+    };
+    const expect_generation = mutable_table.generation(handle) orelse {
+        api_mutex.unlock();
+        return;
+    };
+    var snapshot = cloneMutableOwned(h) catch {
+        api_mutex.unlock();
+        return;
+    };
+    api_mutex.unlock();
+
+    var keep_snapshot = true;
+    defer if (keep_snapshot) snapshot.deinit();
+    invert_mod.invert(W, &snapshot);
+
+    api_mutex.lock();
+    const dst = mutable_table.get(handle) orelse {
+        api_mutex.unlock();
+        return;
+    };
+    const current_generation = mutable_table.generation(handle) orelse {
+        api_mutex.unlock();
+        return;
+    };
+    if (current_generation != expect_generation) {
+        api_mutex.unlock();
+        return;
     }
+    var old = dst.*;
+    dst.* = snapshot;
+    keep_snapshot = false;
+    _ = mutable_table.bumpGeneration(handle);
+    api_mutex.unlock();
+    old.deinit();
 }
 
 export fn fst_optimize(handle: u32) callconv(.c) u32 {
     api_mutex.lock();
-    defer api_mutex.unlock();
-    const h = mutable_table.getConst(handle) orelse return invalid_handle;
-    var result = optimize_mod.optimize(W, alloc, h) catch return invalid_handle;
+    const h = mutable_table.getConst(handle) orelse {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var snapshot = cloneMutableOwned(h) catch {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    api_mutex.unlock();
+    defer snapshot.deinit();
+
+    var result = optimize_mod.optimize(W, alloc, &snapshot) catch return invalid_handle;
+    api_mutex.lock();
     const rh = newMutableHandle(result);
+    api_mutex.unlock();
     if (rh == invalid_handle) result.deinit();
     return rh;
 }
 
 export fn fst_cdrewrite(tau_h: u32, lambda_h: u32, rho_h: u32, sigma_h: u32) callconv(.c) u32 {
     api_mutex.lock();
-    defer api_mutex.unlock();
-    const t = mutable_table.getConst(tau_h) orelse return invalid_handle;
-    const l = mutable_table.getConst(lambda_h) orelse return invalid_handle;
-    const r = mutable_table.getConst(rho_h) orelse return invalid_handle;
-    const s = mutable_table.getConst(sigma_h) orelse return invalid_handle;
-    var result = rewrite_mod.cdrewrite(W, alloc, t, l, r, s) catch return invalid_handle;
+    const t = mutable_table.getConst(tau_h) orelse {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var t_snapshot = cloneMutableOwned(t) catch {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    const l = mutable_table.getConst(lambda_h) orelse {
+        t_snapshot.deinit();
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var l_snapshot = cloneMutableOwned(l) catch {
+        t_snapshot.deinit();
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    const r = mutable_table.getConst(rho_h) orelse {
+        l_snapshot.deinit();
+        t_snapshot.deinit();
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var r_snapshot = cloneMutableOwned(r) catch {
+        l_snapshot.deinit();
+        t_snapshot.deinit();
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    const s = mutable_table.getConst(sigma_h) orelse {
+        r_snapshot.deinit();
+        l_snapshot.deinit();
+        t_snapshot.deinit();
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var s_snapshot = cloneMutableOwned(s) catch {
+        r_snapshot.deinit();
+        l_snapshot.deinit();
+        t_snapshot.deinit();
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    api_mutex.unlock();
+    defer t_snapshot.deinit();
+    defer l_snapshot.deinit();
+    defer r_snapshot.deinit();
+    defer s_snapshot.deinit();
+
+    var result = rewrite_mod.cdrewrite(W, alloc, &t_snapshot, &l_snapshot, &r_snapshot, &s_snapshot) catch return invalid_handle;
+    api_mutex.lock();
     const rh = newMutableHandle(result);
+    api_mutex.unlock();
     if (rh == invalid_handle) result.deinit();
     return rh;
 }
 
 export fn fst_difference(a_handle: u32, b_handle: u32) callconv(.c) u32 {
     api_mutex.lock();
-    defer api_mutex.unlock();
-    const ha = mutable_table.getConst(a_handle) orelse return invalid_handle;
-    const hb = mutable_table.getConst(b_handle) orelse return invalid_handle;
-    var result = difference_mod.difference(W, alloc, ha, hb) catch return invalid_handle;
+    const ha = mutable_table.getConst(a_handle) orelse {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var a_snapshot = cloneMutableOwned(ha) catch {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    const hb = mutable_table.getConst(b_handle) orelse {
+        a_snapshot.deinit();
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var b_snapshot = cloneMutableOwned(hb) catch {
+        a_snapshot.deinit();
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    api_mutex.unlock();
+    defer a_snapshot.deinit();
+    defer b_snapshot.deinit();
+
+    var result = difference_mod.difference(W, alloc, &a_snapshot, &b_snapshot) catch return invalid_handle;
+    api_mutex.lock();
     const h = newMutableHandle(result);
+    api_mutex.unlock();
     if (h == invalid_handle) result.deinit();
     return h;
 }
 
 export fn fst_replace(root_handle: u32, labels: ?[*]const u32, fst_handles: ?[*]const u32, num_pairs: u32) callconv(.c) u32 {
-    api_mutex.lock();
-    defer api_mutex.unlock();
-    const root = mutable_table.getConst(root_handle) orelse return invalid_handle;
     const lbl_ptr = labels orelse return invalid_handle;
     const fst_ptr = fst_handles orelse return invalid_handle;
 
-    // Build pairs array on the stack (arena for larger)
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const pairs = arena.alloc(replace_mod.ReplacePair(W), num_pairs) catch return invalid_handle;
-    for (0..num_pairs) |i| {
-        const fst_h = mutable_table.getConst(fst_ptr[i]) orelse return invalid_handle;
-        pairs[i] = .{ .label = lbl_ptr[i], .fst = fst_h };
+    const labels_copy = arena.dupe(u32, lbl_ptr[0..num_pairs]) catch return invalid_handle;
+    const handles_copy = arena.dupe(u32, fst_ptr[0..num_pairs]) catch return invalid_handle;
+
+    const snapshots = alloc.alloc(MutableFst, num_pairs) catch return invalid_handle;
+    defer alloc.free(snapshots);
+    var cloned_count: usize = 0;
+    defer {
+        for (0..cloned_count) |i| {
+            snapshots[i].deinit();
+        }
     }
 
-    var result = replace_mod.replace(W, alloc, root, pairs) catch return invalid_handle;
+    api_mutex.lock();
+    const root = mutable_table.getConst(root_handle) orelse {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    var root_snapshot = cloneMutableOwned(root) catch {
+        api_mutex.unlock();
+        return invalid_handle;
+    };
+    for (0..num_pairs) |i| {
+        const fst_h = mutable_table.getConst(handles_copy[i]) orelse {
+            root_snapshot.deinit();
+            api_mutex.unlock();
+            return invalid_handle;
+        };
+        snapshots[i] = cloneMutableOwned(fst_h) catch {
+            root_snapshot.deinit();
+            api_mutex.unlock();
+            return invalid_handle;
+        };
+        cloned_count += 1;
+    }
+    api_mutex.unlock();
+    defer root_snapshot.deinit();
+
+    const pairs = arena.alloc(replace_mod.ReplacePair(W), num_pairs) catch return invalid_handle;
+    for (0..num_pairs) |i| {
+        pairs[i] = .{ .label = labels_copy[i], .fst = &snapshots[i] };
+    }
+
+    var result = replace_mod.replace(W, alloc, &root_snapshot, pairs) catch return invalid_handle;
+    api_mutex.lock();
     const h = newMutableHandle(result);
+    api_mutex.unlock();
     if (h == invalid_handle) result.deinit();
     return h;
 }
 
 export fn fst_project(handle: u32, side: c_int) callconv(.c) void {
-    api_mutex.lock();
-    defer api_mutex.unlock();
-    const h = mutable_table.get(handle) orelse return;
     const pt: project_mod.ProjectType = switch (side) {
         0 => .input,
         1 => .output,
         else => return,
     };
-    project_mod.project(W, h, pt);
+
+    api_mutex.lock();
+    const h = mutable_table.getConst(handle) orelse {
+        api_mutex.unlock();
+        return;
+    };
+    const expect_generation = mutable_table.generation(handle) orelse {
+        api_mutex.unlock();
+        return;
+    };
+    var snapshot = cloneMutableOwned(h) catch {
+        api_mutex.unlock();
+        return;
+    };
+    api_mutex.unlock();
+
+    var keep_snapshot = true;
+    defer if (keep_snapshot) snapshot.deinit();
+    project_mod.project(W, &snapshot, pt);
+
+    api_mutex.lock();
+    const dst = mutable_table.get(handle) orelse {
+        api_mutex.unlock();
+        return;
+    };
+    const current_generation = mutable_table.generation(handle) orelse {
+        api_mutex.unlock();
+        return;
+    };
+    if (current_generation != expect_generation) {
+        api_mutex.unlock();
+        return;
+    }
+    var old = dst.*;
+    dst.* = snapshot;
+    keep_snapshot = false;
+    _ = mutable_table.bumpGeneration(handle);
+    api_mutex.unlock();
+    old.deinit();
 }
 
 // ── String utilities ──
@@ -521,6 +1043,21 @@ export fn fst_print_string(handle: u32, buf: ?[*]u8, buf_len: u32) callconv(.c) 
     defer api_mutex.unlock();
     const h = mutable_table.getConst(handle) orelse return -1;
     const result = string_mod.printString(W, alloc, h) catch return -1;
+    const s = result orelse return -1;
+    defer alloc.free(s);
+
+    if (s.len > buf_len) return -1;
+    if (buf) |b| {
+        @memcpy(b[0..s.len], s);
+    }
+    return @intCast(s.len);
+}
+
+export fn fst_print_output_string(handle: u32, buf: ?[*]u8, buf_len: u32) callconv(.c) i32 {
+    api_mutex.lock();
+    defer api_mutex.unlock();
+    const h = mutable_table.getConst(handle) orelse return -1;
+    const result = string_mod.printOutputString(W, alloc, h) catch return -1;
     const s = result orelse return -1;
     defer alloc.free(s);
 

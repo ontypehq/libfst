@@ -7,6 +7,11 @@ const StateId = arc_mod.StateId;
 const no_state = arc_mod.no_state;
 const Allocator = std.mem.Allocator;
 
+const StringTape = enum {
+    input,
+    output,
+};
+
 /// Compile a byte string into a linear-chain FST (acceptor).
 /// Each byte becomes a label on an arc. Both ilabel and olabel are the same.
 pub fn compileString(comptime W: type, allocator: Allocator, input: []const u8) !mutable_fst_mod.MutableFst(W) {
@@ -47,6 +52,21 @@ pub fn compileStringTransducer(comptime W: type, allocator: Allocator, input: []
 /// Extract a string from a linear-chain acceptor FST.
 /// Returns null if the FST is not a simple linear chain.
 pub fn printString(comptime W: type, allocator: Allocator, fst: *const mutable_fst_mod.MutableFst(W)) !?[]u8 {
+    return printStringFromTape(W, allocator, fst, .input);
+}
+
+/// Extract the output tape string from a linear-chain transducer/FST.
+/// Returns null if the FST is not a simple linear chain.
+pub fn printOutputString(comptime W: type, allocator: Allocator, fst: *const mutable_fst_mod.MutableFst(W)) !?[]u8 {
+    return printStringFromTape(W, allocator, fst, .output);
+}
+
+fn printStringFromTape(
+    comptime W: type,
+    allocator: Allocator,
+    fst: *const mutable_fst_mod.MutableFst(W),
+    tape: StringTape,
+) !?[]u8 {
     const start_s = fst.start();
     if (start_s == no_state) return null;
 
@@ -61,9 +81,13 @@ pub fn printString(comptime W: type, allocator: Allocator, fst: *const mutable_f
         const state_arcs = fst.arcs(current);
         if (state_arcs.len != 1) return null; // Not a linear chain
         const a = state_arcs[0];
-        if (a.ilabel != arc_mod.epsilon) {
+        const label = switch (tape) {
+            .input => a.ilabel,
+            .output => a.olabel,
+        };
+        if (label != arc_mod.epsilon) {
             // Label = byte + 1 (since 0 = epsilon)
-            try result.append(allocator, @intCast(a.ilabel - 1));
+            try result.append(allocator, @intCast(label - 1));
         }
         current = a.nextstate;
         if (current == no_state) return null;
@@ -140,4 +164,20 @@ test "string: UTF-8 bytes" {
     const s = try printString(W, allocator, &fst);
     defer allocator.free(s.?);
     try std.testing.expectEqualStrings(input, s.?);
+}
+
+test "string: print output tape for transducer" {
+    const W = @import("weight.zig").TropicalWeight;
+    const allocator = std.testing.allocator;
+
+    var fst = try compileStringTransducer(W, allocator, "a", "b");
+    defer fst.deinit();
+
+    const in_s = try printString(W, allocator, &fst);
+    defer allocator.free(in_s.?);
+    try std.testing.expectEqualStrings("a", in_s.?);
+
+    const out_s = try printOutputString(W, allocator, &fst);
+    defer allocator.free(out_s.?);
+    try std.testing.expectEqualStrings("b", out_s.?);
 }

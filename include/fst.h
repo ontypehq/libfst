@@ -9,10 +9,16 @@ extern "C" {
 #endif
 
 /* Thread safety:
- *   - A single global mutex protects ALL C API calls for their entire
- *     duration. Concurrent calls from multiple threads are safe — the mutex
- *     serializes them and prevents use-after-free / dangling pointer races.
- *   - fst_teardown() also acquires the mutex; however, the caller MUST
+ *   - A global mutex protects handle-table bookkeeping and short critical
+ *     sections only.
+ *   - Heavy algorithms run outside the mutex on internal snapshots, so
+ *     independent calls can run concurrently.
+ *   - In-place mutating APIs (`fst_union`, `fst_concat`, `fst_closure`,
+ *     `fst_minimize`) use optimistic commit. If the target handle changed
+ *     concurrently, they fail with `FST_INVALID_ARG`.
+ *   - `fst_invert` and `fst_project` are in-place void APIs; on concurrent
+ *     conflict they become no-ops.
+ *   - fst_teardown() acquires the mutex; however, the caller MUST
  *     ensure no other API calls are in flight (i.e. call at quiescent time).
  *   - MutableFst semantics: single-writer. Do NOT mutate the same handle
  *     from multiple threads simultaneously.
@@ -55,6 +61,7 @@ typedef struct {
 
 /* --- MutableFst lifecycle --- */
 FstMutableHandle fst_mutable_new(void);
+FstMutableHandle fst_mutable_clone(FstMutableHandle handle);
 void fst_mutable_free(FstMutableHandle handle);
 uint32_t fst_mutable_add_state(FstMutableHandle handle);
 FstError fst_mutable_set_start(FstMutableHandle handle, uint32_t state);
@@ -85,15 +92,20 @@ uint32_t fst_get_arcs(FstHandle handle, uint32_t state,
 
 /* --- I/O --- */
 FstMutableHandle fst_read_text(const char* path);
+/* Loads libfst native binary format only. */
 FstHandle fst_load(const char* path);
+/* Explicit OpenFst loader via `fstprint <path>` + AT&T import. */
+FstHandle fst_load_openfst(const char* path);
 FstError fst_save(FstHandle handle, const char* path);
 
 /* --- Operations (MutableFst -> MutableFst) --- */
 FstMutableHandle fst_compose(FstMutableHandle a, FstMutableHandle b);
 FstMutableHandle fst_compose_frozen(FstMutableHandle a, FstHandle b);
+/* Acceptors only. For transducers, use fst_optimize (encode/decode path). */
 FstMutableHandle fst_determinize(FstMutableHandle handle);
 FstError fst_minimize(FstMutableHandle handle);
 FstMutableHandle fst_rm_epsilon(FstMutableHandle handle);
+/* Only n == 1 is supported; other values return FST_INVALID_HANDLE. */
 FstMutableHandle fst_shortest_path(FstMutableHandle handle, uint32_t n);
 FstError fst_union(FstMutableHandle a, FstMutableHandle b);
 FstError fst_concat(FstMutableHandle a, FstMutableHandle b);
@@ -104,6 +116,7 @@ FstMutableHandle fst_cdrewrite(FstMutableHandle tau,
                                 FstMutableHandle lambda,
                                 FstMutableHandle rho,
                                 FstMutableHandle sigma);
+/* Requires a,b to be acceptors; b must also be deterministic, epsilon-free and unweighted. */
 FstMutableHandle fst_difference(FstMutableHandle a, FstMutableHandle b);
 FstMutableHandle fst_replace(FstMutableHandle root,
                               const uint32_t* labels,
@@ -114,6 +127,7 @@ void fst_project(FstMutableHandle handle, int side);  /* 0=input, 1=output */
 /* --- String utilities --- */
 FstMutableHandle fst_compile_string(const uint8_t* input, uint32_t len);
 int32_t fst_print_string(FstMutableHandle handle, uint8_t* buf, uint32_t buf_len);
+int32_t fst_print_output_string(FstMutableHandle handle, uint8_t* buf, uint32_t buf_len);
 
 /* --- Global teardown --- */
 void fst_teardown(void);

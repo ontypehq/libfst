@@ -8,18 +8,22 @@ const epsilon = arc_mod.epsilon;
 const no_state = arc_mod.no_state;
 const Allocator = std.mem.Allocator;
 
-/// Find the n-best (shortest) paths through a weighted FST.
+/// Find the single shortest path through a weighted FST.
 /// Uses Dijkstra-like search with deterministic tie-breaking:
 ///   1. Compare weights (lower is better for tropical)
 ///   2. If equal, compare state IDs ascending
 ///
-/// Returns a new MutableFst containing the n-best paths as a tree.
+/// This API accepts `n` for compatibility with the C surface, but only
+/// `n == 1` is supported. For `n > 1`, returns `error.UnsupportedNShortest`.
+///
+/// Returns a new MutableFst containing the best path as a linear chain.
 pub fn shortestPath(comptime W: type, allocator: Allocator, fst: *const mutable_fst_mod.MutableFst(W), n: u32) !mutable_fst_mod.MutableFst(W) {
     const A = arc_mod.Arc(W);
 
     if (fst.start() == no_state or n == 0) {
         return mutable_fst_mod.MutableFst(W).init(allocator);
     }
+    if (n != 1) return error.UnsupportedNShortest;
 
     // Arena for all temporaries — freed in bulk on return
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -81,130 +85,52 @@ pub fn shortestPath(comptime W: type, allocator: Allocator, fst: *const mutable_
         }
     }
 
-    // Find n-best final states
-    const FinalCandidate = struct {
-        state: StateId,
-        total_weight: W,
-    };
-    var candidates: std.ArrayList(FinalCandidate) = .empty;
-
+    // Pick best reachable final state.
+    var best_final: StateId = no_state;
+    var best_total = W.zero;
     for (0..num_states) |i| {
         const s: StateId = @intCast(i);
         if (dist[s].isZero()) continue;
         const fw = fst.finalWeight(s);
         if (fw.isZero()) continue;
-        try candidates.append(arena, .{
-            .state = s,
-            .total_weight = W.times(dist[s], fw),
-        });
-    }
-
-    // Sort by total weight (ascending for tropical)
-    std.mem.sort(FinalCandidate, candidates.items, {}, struct {
-        fn lessThan(_: void, a_: FinalCandidate, b_: FinalCandidate) bool {
-            const cmp = W.compare(a_.total_weight, b_.total_weight);
-            if (cmp == .lt) return true;
-            if (cmp == .gt) return false;
-            return a_.state < b_.state;
+        const total = W.times(dist[s], fw);
+        if (best_final == no_state or
+            W.compare(total, best_total) == .lt or
+            (W.compare(total, best_total) == .eq and s < best_final))
+        {
+            best_final = s;
+            best_total = total;
         }
-    }.lessThan);
-
-    // Take top n
-    const take = @min(n, @as(u32, @intCast(candidates.items.len)));
-    if (take == 0) {
+    }
+    if (best_final == no_state) {
         return mutable_fst_mod.MutableFst(W).init(allocator);
     }
 
-    // Build result: for n=1, trace back the single best path
+    // Build result: trace back the best path.
     var result = mutable_fst_mod.MutableFst(W).init(allocator);
     errdefer result.deinit();
+    var path: std.ArrayList(StateId) = .empty;
 
-    if (take == 1) {
-        // Trace back single best path
-        const best_final = candidates.items[0].state;
-        var path: std.ArrayList(StateId) = .empty;
+    var current = best_final;
+    try path.append(arena, current);
+    while (back[current]) |bp| {
+        try path.append(arena, bp.prev_state);
+        current = bp.prev_state;
+    }
 
-        var current = best_final;
-        try path.append(arena, current);
-        while (back[current]) |bp| {
-            try path.append(arena, bp.prev_state);
-            current = bp.prev_state;
-        }
+    std.mem.reverse(StateId, path.items);
 
-        // Reverse path
-        std.mem.reverse(StateId, path.items);
+    try result.addStates(path.items.len);
+    result.setStart(0);
+    result.setFinal(@intCast(path.items.len - 1), fst.finalWeight(best_final));
 
-        // Build linear FST
-        try result.addStates(path.items.len);
-        result.setStart(0);
-        result.setFinal(@intCast(path.items.len - 1), fst.finalWeight(best_final));
-
-        for (0..path.items.len - 1) |i| {
-            const src = path.items[i];
-            const dst = path.items[i + 1];
-            // Find the arc from src to dst in original FST
-            for (fst.arcs(src)) |a| {
-                if (a.nextstate == dst) {
-                    try result.addArc(@intCast(i), A.init(a.ilabel, a.olabel, a.weight, @intCast(i + 1)));
-                    break;
-                }
-            }
-        }
-    } else {
-        // For n > 1, build a tree with multiple paths
-        // Each path shares common prefixes
-        var state_map: std.AutoHashMapUnmanaged(StateId, StateId) = .empty;
-
-        for (0..take) |ci| {
-            const best_final = candidates.items[ci].state;
-            var path: std.ArrayList(StateId) = .empty;
-
-            var current = best_final;
-            try path.append(arena, current);
-            while (back[current]) |bp| {
-                try path.append(arena, bp.prev_state);
-                current = bp.prev_state;
-            }
-            std.mem.reverse(StateId, path.items);
-
-            // Add path to result, reusing states where possible
-            var prev_result_state: StateId = no_state;
-            for (path.items, 0..) |orig_s, pi| {
-                const rs = if (state_map.get(orig_s)) |existing|
-                    existing
-                else blk: {
-                    const ns = try result.addState();
-                    try state_map.put(arena, orig_s, ns);
-                    break :blk ns;
-                };
-
-                if (pi == 0) {
-                    result.setStart(rs);
-                }
-                if (pi == path.items.len - 1) {
-                    result.setFinal(rs, fst.finalWeight(orig_s));
-                }
-                if (prev_result_state != no_state and pi > 0) {
-                    const orig_prev = path.items[pi - 1];
-                    // Find arc from prev to current
-                    for (fst.arcs(orig_prev)) |a| {
-                        if (a.nextstate == orig_s) {
-                            // Check if this arc already exists
-                            var exists = false;
-                            for (result.arcs(prev_result_state)) |ra| {
-                                if (ra.nextstate == rs and ra.ilabel == a.ilabel) {
-                                    exists = true;
-                                    break;
-                                }
-                            }
-                            if (!exists) {
-                                try result.addArc(prev_result_state, A.init(a.ilabel, a.olabel, a.weight, rs));
-                            }
-                            break;
-                        }
-                    }
-                }
-                prev_result_state = rs;
+    for (0..path.items.len - 1) |i| {
+        const src = path.items[i];
+        const dst = path.items[i + 1];
+        for (fst.arcs(src)) |a| {
+            if (a.nextstate == dst) {
+                try result.addArc(@intCast(i), A.init(a.ilabel, a.olabel, a.weight, @intCast(i + 1)));
+                break;
             }
         }
     }
@@ -260,4 +186,17 @@ test "shortest-path: empty FST" {
     defer result.deinit();
 
     try std.testing.expectEqual(no_state, result.start());
+}
+
+test "shortest-path: n > 1 not supported" {
+    const W = @import("../weight.zig").TropicalWeight;
+    const allocator = std.testing.allocator;
+
+    var fst = mutable_fst_mod.MutableFst(W).init(allocator);
+    defer fst.deinit();
+    _ = try fst.addState();
+    fst.setStart(0);
+    fst.setFinal(0, W.one);
+
+    try std.testing.expectError(error.UnsupportedNShortest, shortestPath(W, allocator, &fst, 2));
 }

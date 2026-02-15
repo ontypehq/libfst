@@ -49,16 +49,16 @@ fst_mutable_free(h);
 | Operation | Description |
 |-----------|-------------|
 | `compose` | Combine two FSTs (key operation for text normalization) |
-| `determinize` | Convert NFA to DFA |
+| `determinize` | Convert acceptor NFA to DFA (acceptor-only) |
 | `minimize` | Merge equivalent states (Hopcroft partition refinement) |
 | `rm_epsilon` | Remove epsilon transitions |
-| `shortest_path` | Find n-best paths |
+| `shortest_path` | Find single best path (`n=1`) |
 | `union` | L(a) ∪ L(b) |
 | `concat` | L(a) · L(b) |
 | `closure` | L* (star), L+ (plus), L? (optional) |
 | `invert` | Swap input/output tapes |
 | `project` | Project to input or output tape |
-| `difference` | L(a) - L(b) |
+| `difference` | L(a) - L(b), with deterministic epsilon-free unweighted RHS |
 | `replace` | Recursive subroutine substitution with cycle detection |
 | `cdrewrite` | Context-dependent obligatory rewrite (unit-weight grammars) |
 | `reverse` | Reverse all paths |
@@ -66,7 +66,13 @@ fst_mutable_free(h);
 
 ## Thread Safety
 
-Handle table operations are mutex-protected (safe for concurrent C API calls).
+Handle table bookkeeping is mutex-protected, but heavy algorithms run on
+snapshots outside the lock. This removes full-call serialization for
+compute-heavy C API operations.
+
+In-place mutating C APIs (`union`/`concat`/`closure`/`minimize`) use optimistic
+commit and return `invalid_arg` if the same handle changed concurrently.
+
 `MutableFst`: single-writer. `Fst` (frozen): fully reentrant and thread-safe.
 
 ## Build & Test
@@ -78,6 +84,17 @@ zig build prop         # property-based tests (semiring laws, idempotency)
 zig build fuzz         # fuzz test harness
 zig build diff         # diff tests vs Pynini golden outputs (needs corpus)
 zig build att2lfst     # build converter at zig-out/bin/att2lfst
+zig build bench        # run profile-friendly benchmark (scenarios + JSON output)
+```
+
+Example benchmark run:
+
+```bash
+zig build bench -Doptimize=ReleaseFast -- \
+  --scenario optimize_transducer \
+  --len 16384 --branches 4 \
+  --iters 300 --warmup 20 \
+  --format json
 ```
 
 To generate golden corpus for diff tests:
@@ -113,8 +130,8 @@ Labels: `u32` (0 = epsilon). StateId: `u32` (maxInt = no_state sentinel).
 
 For OnType integration, a pragmatic path is:
 1. Keep WeText/OpenFst assets as source of truth (`*_tagger.fst`, `*_verbalizer.fst`)
-2. Convert them offline into libfst binary format
-3. Load only libfst binaries at runtime
+2. Either load OpenFst `.fst` directly via `fst_load_openfst` (requires `fstprint`), or
+   convert them offline into libfst binary format for deployment simplicity
 
 ### Option A: one-shot converter script
 
@@ -142,6 +159,11 @@ fstprint zh_itn_tagger.fst > /tmp/zh_itn_tagger.att
 zig build att2lfst
 ./zig-out/bin/att2lfst --input /tmp/zh_itn_tagger.att --output zh_itn_tagger.libfst.fst
 ```
+
+### Runtime direct loading
+
+- `fst_load(path)`: libfst native binary only.
+- `fst_load_openfst(path)`: OpenFst `.fst` via `fstprint` + AT&T import.
 
 ## License
 

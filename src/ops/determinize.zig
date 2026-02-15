@@ -11,12 +11,14 @@ const Allocator = std.mem.Allocator;
 /// Determinize a weighted FST using the weighted subset construction.
 /// Input FST should have no epsilon transitions (run rmEpsilon first).
 /// Each state in the output corresponds to a weighted subset of input states.
+/// This implementation only supports acceptors (`ilabel == olabel` on all arcs).
 pub fn determinize(comptime W: type, allocator: Allocator, fst: *const mutable_fst_mod.MutableFst(W)) !mutable_fst_mod.MutableFst(W) {
     const A = arc_mod.Arc(W);
 
     if (fst.start() == no_state) {
         return mutable_fst_mod.MutableFst(W).init(allocator);
     }
+    if (!isAcceptor(W, fst)) return error.UnsupportedTransducerDeterminize;
 
     // Arena for all temporaries — freed in bulk on return
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -74,7 +76,10 @@ pub fn determinize(comptime W: type, allocator: Allocator, fst: *const mutable_f
                 if (a.ilabel != epsilon) {
                     var found = false;
                     for (labels_buf.items) |l| {
-                        if (l == a.ilabel) { found = true; break; }
+                        if (l == a.ilabel) {
+                            found = true;
+                            break;
+                        }
                     }
                     if (!found) try labels_buf.append(arena, a.ilabel);
                 }
@@ -129,19 +134,22 @@ pub fn determinize(comptime W: type, allocator: Allocator, fst: *const mutable_f
                 break :blk ns;
             };
 
-            // Pick first olabel for this ilabel
-            var olabel: Label = label;
-            for (current_items) |elem| {
-                for (fst.arcs(elem.state)) |a| {
-                    if (a.ilabel == label) { olabel = a.olabel; break; }
-                }
-            }
-
-            try result.addArc(current_id, A.init(label, olabel, common, next_state));
+            // Acceptor-only determinization keeps labels on both tapes aligned.
+            try result.addArc(current_id, A.init(label, label, common, next_state));
         }
     }
 
     return result;
+}
+
+fn isAcceptor(comptime W: type, fst: *const mutable_fst_mod.MutableFst(W)) bool {
+    for (0..fst.numStates()) |i| {
+        const s: StateId = @intCast(i);
+        for (fst.arcs(s)) |a| {
+            if (a.ilabel != a.olabel) return false;
+        }
+    }
+    return true;
 }
 
 fn SubsetElem(comptime W: type) type {
@@ -247,4 +255,20 @@ test "determinize: idempotent" {
 
     try std.testing.expectEqual(det1.numStates(), det2.numStates());
     try std.testing.expectEqual(det1.totalArcs(), det2.totalArcs());
+}
+
+test "determinize: rejects transducer input" {
+    const W = @import("../weight.zig").TropicalWeight;
+    const A = arc_mod.Arc(W);
+    const allocator = std.testing.allocator;
+
+    var fst = mutable_fst_mod.MutableFst(W).init(allocator);
+    defer fst.deinit();
+    _ = try fst.addState();
+    _ = try fst.addState();
+    fst.setStart(0);
+    fst.setFinal(1, W.one);
+    try fst.addArc(0, A.init('a' + 1, 'b' + 1, W.one, 1));
+
+    try std.testing.expectError(error.UnsupportedTransducerDeterminize, determinize(W, allocator, &fst));
 }

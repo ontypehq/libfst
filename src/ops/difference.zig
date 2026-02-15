@@ -10,12 +10,20 @@ const no_state = arc_mod.no_state;
 const Allocator = std.mem.Allocator;
 
 /// Compute the difference of two FSTs: L(a) - L(b).
-/// Requires b to be a deterministic acceptor (no epsilon transitions).
+/// Requires:
+/// - `a` to be an acceptor (`ilabel == olabel`)
+/// - `b` to be an unweighted, epsilon-free, deterministic acceptor
 ///
 /// Implementation: complement(b) ∘ a, where complement swaps
 /// final/non-final states in a complete DFA.
 pub fn difference(comptime W: type, allocator: Allocator, a: *const mutable_fst_mod.MutableFst(W), b: *const mutable_fst_mod.MutableFst(W)) !mutable_fst_mod.MutableFst(W) {
     const A = arc_mod.Arc(W);
+
+    if (!isAcceptor(W, a)) return error.InvalidDifferenceInput;
+    if (!isAcceptor(W, b)) return error.InvalidDifferenceInput;
+    if (!isEpsilonFree(W, b)) return error.InvalidDifferenceInput;
+    if (!isDeterministic(W, b)) return error.InvalidDifferenceInput;
+    if (!isUnweighted(W, b)) return error.InvalidDifferenceInput;
 
     if (a.start() == no_state) {
         return mutable_fst_mod.MutableFst(W).init(allocator);
@@ -94,6 +102,51 @@ pub fn difference(comptime W: type, allocator: Allocator, a: *const mutable_fst_
     return compose_mod.compose(W, allocator, a, &comp);
 }
 
+fn isAcceptor(comptime W: type, fst: *const mutable_fst_mod.MutableFst(W)) bool {
+    for (0..fst.numStates()) |i| {
+        const s: StateId = @intCast(i);
+        for (fst.arcs(s)) |a| {
+            if (a.ilabel != a.olabel) return false;
+        }
+    }
+    return true;
+}
+
+fn isEpsilonFree(comptime W: type, fst: *const mutable_fst_mod.MutableFst(W)) bool {
+    for (0..fst.numStates()) |i| {
+        const s: StateId = @intCast(i);
+        for (fst.arcs(s)) |a| {
+            if (a.ilabel == epsilon) return false;
+        }
+    }
+    return true;
+}
+
+fn isDeterministic(comptime W: type, fst: *const mutable_fst_mod.MutableFst(W)) bool {
+    for (0..fst.numStates()) |i| {
+        const s: StateId = @intCast(i);
+        const arcs = fst.arcs(s);
+        for (arcs, 0..) |a, ai| {
+            for (arcs[ai + 1 ..]) |b| {
+                if (a.ilabel == b.ilabel) return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn isUnweighted(comptime W: type, fst: *const mutable_fst_mod.MutableFst(W)) bool {
+    for (0..fst.numStates()) |i| {
+        const s: StateId = @intCast(i);
+        const fw = fst.finalWeight(s);
+        if (!fw.isZero() and !W.eql(fw, W.one)) return false;
+        for (fst.arcs(s)) |a| {
+            if (!W.eql(a.weight, W.one)) return false;
+        }
+    }
+    return true;
+}
+
 // ── Tests ──
 
 test "difference: A - empty = A" {
@@ -137,4 +190,52 @@ test "difference: A - A = empty" {
     // With complement construction, A-A should have no reachable final states
     // (but we can't easily verify reachability in this simple test)
     _ = &has_final;
+}
+
+test "difference: rejects non-acceptor input" {
+    const W = @import("../weight.zig").TropicalWeight;
+    const A = arc_mod.Arc(W);
+    const allocator = std.testing.allocator;
+
+    var a = mutable_fst_mod.MutableFst(W).init(allocator);
+    defer a.deinit();
+    _ = try a.addState();
+    _ = try a.addState();
+    a.setStart(0);
+    a.setFinal(1, W.one);
+    try a.addArc(0, A.init('a' + 1, 'b' + 1, W.one, 1)); // transducer arc
+
+    var b = mutable_fst_mod.MutableFst(W).init(allocator);
+    defer b.deinit();
+    _ = try b.addState();
+    _ = try b.addState();
+    b.setStart(0);
+    b.setFinal(1, W.one);
+    try b.addArc(0, A.init('a' + 1, 'a' + 1, W.one, 1));
+
+    try std.testing.expectError(error.InvalidDifferenceInput, difference(W, allocator, &a, &b));
+}
+
+test "difference: rejects epsilon in second argument" {
+    const W = @import("../weight.zig").TropicalWeight;
+    const A = arc_mod.Arc(W);
+    const allocator = std.testing.allocator;
+
+    var a = mutable_fst_mod.MutableFst(W).init(allocator);
+    defer a.deinit();
+    _ = try a.addState();
+    _ = try a.addState();
+    a.setStart(0);
+    a.setFinal(1, W.one);
+    try a.addArc(0, A.init('a' + 1, 'a' + 1, W.one, 1));
+
+    var b = mutable_fst_mod.MutableFst(W).init(allocator);
+    defer b.deinit();
+    _ = try b.addState();
+    _ = try b.addState();
+    b.setStart(0);
+    b.setFinal(1, W.one);
+    try b.addArc(0, A.initEpsilon(W.one, 1));
+
+    try std.testing.expectError(error.InvalidDifferenceInput, difference(W, allocator, &a, &b));
 }

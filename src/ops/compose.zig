@@ -46,15 +46,9 @@ pub fn compose(comptime W: type, allocator: Allocator, fst1: anytype, fst2: anyt
         s1: StateId,
         s2: StateId,
         filter: u8,
-
-        fn toKey(self: @This()) u64 {
-            return @as(u64, self.s1) |
-                (@as(u64, self.s2) << 21) |
-                (@as(u64, self.filter) << 42);
-        }
     };
 
-    var state_map: std.AutoHashMapUnmanaged(u64, StateId) = .empty;
+    var state_map: std.AutoHashMapUnmanaged(StateTuple, StateId) = .empty;
 
     var queue: std.ArrayList(StateTuple) = .empty;
 
@@ -62,13 +56,13 @@ pub fn compose(comptime W: type, allocator: Allocator, fst1: anytype, fst2: anyt
     const init_tuple = StateTuple{ .s1 = fst1.start(), .s2 = fst2.start(), .filter = 0 };
     const init_state = try result.addState();
     result.setStart(init_state);
-    try state_map.put(arena, init_tuple.toKey(), init_state);
+    try state_map.put(arena, init_tuple, init_state);
     try queue.append(arena, init_tuple);
 
     var qi: usize = 0;
     while (qi < queue.items.len) : (qi += 1) {
         const t = queue.items[qi];
-        const current = state_map.get(t.toKey()).?;
+        const current = state_map.get(t).?;
 
         // Final weight
         const fw1 = fst1.finalWeight(t.s1);
@@ -81,15 +75,14 @@ pub fn compose(comptime W: type, allocator: Allocator, fst1: anytype, fst2: anyt
         const getOrCreate = struct {
             fn call(
                 res: *mutable_fst_mod.MutableFst(W),
-                smap: *std.AutoHashMapUnmanaged(u64, StateId),
+                smap: *std.AutoHashMapUnmanaged(StateTuple, StateId),
                 q: *std.ArrayList(StateTuple),
                 alloc: Allocator,
                 tuple: StateTuple,
             ) !StateId {
-                const key = tuple.toKey();
-                if (smap.get(key)) |existing| return existing;
+                if (smap.get(tuple)) |existing| return existing;
                 const ns = try res.addState();
-                try smap.put(alloc, key, ns);
+                try smap.put(alloc, tuple, ns);
                 try q.append(alloc, tuple);
                 return ns;
             }
