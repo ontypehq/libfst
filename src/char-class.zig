@@ -146,8 +146,8 @@ test "char-class: byte" {
     var fst = try byte(W, allocator);
     defer fst.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), fst.numStates());
-    try std.testing.expectEqual(@as(usize, 256), fst.numArcs(0));
+    try std.testing.expectEqual(2, fst.numStates());
+    try std.testing.expectEqual(256, fst.numArcs(0));
 }
 
 test "char-class: alpha" {
@@ -157,8 +157,8 @@ test "char-class: alpha" {
     var fst = try alpha(W, allocator);
     defer fst.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), fst.numStates());
-    try std.testing.expectEqual(@as(usize, 52), fst.numArcs(0)); // 26 + 26
+    try std.testing.expectEqual(2, fst.numStates());
+    try std.testing.expectEqual(52, fst.numArcs(0)); // 26 + 26
 }
 
 test "char-class: digit" {
@@ -168,8 +168,8 @@ test "char-class: digit" {
     var fst = try digit(W, allocator);
     defer fst.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), fst.numStates());
-    try std.testing.expectEqual(@as(usize, 10), fst.numArcs(0));
+    try std.testing.expectEqual(2, fst.numStates());
+    try std.testing.expectEqual(10, fst.numArcs(0));
 }
 
 test "char-class: utf8Char" {
@@ -180,7 +180,7 @@ test "char-class: utf8Char" {
     defer fst.deinit();
 
     // 8 states for the UTF-8 byte patterns
-    try std.testing.expectEqual(@as(usize, 8), fst.numStates());
+    try std.testing.expectEqual(8, fst.numStates());
 }
 
 test "char-class: sigmaStar" {
@@ -190,7 +190,7 @@ test "char-class: sigmaStar" {
     var fst = try sigmaStar(W, allocator);
     defer fst.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), fst.numStates());
-    try std.testing.expectEqual(@as(usize, 256), fst.numArcs(0));
+    try std.testing.expectEqual(1, fst.numStates());
+    try std.testing.expectEqual(256, fst.numArcs(0));
     try std.testing.expect(fst.isFinal(0)); // accepts empty string too
 }

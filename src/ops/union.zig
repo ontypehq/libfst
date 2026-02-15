@@ -70,7 +70,7 @@ test "union: simple" {
     const start_s = fst1.start();
     try std.testing.expect(start_s != no_state);
     const start_arcs = fst1.arcs(start_s);
-    try std.testing.expectEqual(@as(usize, 2), start_arcs.len);
+    try std.testing.expectEqual(2, start_arcs.len);
     try std.testing.expect(start_arcs[0].isEpsilon());
     try std.testing.expect(start_arcs[1].isEpsilon());
     _ = A;

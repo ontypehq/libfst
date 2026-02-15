@@ -28,20 +28,20 @@ pub fn determinize(comptime W: type, allocator: Allocator, fst: *const mutable_f
 
     // Store subsets as arrays of (state, residual_weight) pairs.
     // Each subset is identified by its index in `subsets`.
-    var subset_states = std.ArrayListUnmanaged(std.ArrayListUnmanaged(SubsetElem(W))){};
+    var subset_states: std.ArrayList(std.ArrayList(SubsetElem(W))) = .empty;
 
     // Map canonical subset key -> subset index (= result state ID)
-    var subset_map = std.StringHashMapUnmanaged(StateId){};
+    var subset_map: std.StringHashMapUnmanaged(StateId) = .empty;
 
     // Queue of subset indices to process
-    var queue = std.ArrayListUnmanaged(StateId){};
+    var queue: std.ArrayList(StateId) = .empty;
 
     // Temp buffers
-    var labels_buf = std.ArrayListUnmanaged(Label){};
-    var next_buf = std.ArrayListUnmanaged(SubsetElem(W)){};
+    var labels_buf: std.ArrayList(Label) = .empty;
+    var next_buf: std.ArrayList(SubsetElem(W)) = .empty;
 
     // Initial subset: {(start, One)}
-    var init_subset = std.ArrayListUnmanaged(SubsetElem(W)){};
+    var init_subset: std.ArrayList(SubsetElem(W)) = .empty;
     try init_subset.append(arena, .{ .state = fst.start(), .weight = W.one });
     const init_key = try subsetKey(W, arena, init_subset.items);
     try subset_states.append(arena, init_subset);
@@ -120,7 +120,7 @@ pub fn determinize(comptime W: type, allocator: Allocator, fst: *const mutable_f
                 break :blk existing;
             } else blk: {
                 // Store a copy of the subset
-                var next_copy = std.ArrayListUnmanaged(SubsetElem(W)){};
+                var next_copy: std.ArrayList(SubsetElem(W)) = .empty;
                 try next_copy.appendSlice(arena, next_buf.items);
                 try subset_states.append(arena, next_copy);
                 const ns = try result.addState();
@@ -215,7 +215,7 @@ test "determinize: simple nondeterministic" {
     for (start_arcs) |a| {
         if (a.ilabel == 'a' + 1) label_count += 1;
     }
-    try std.testing.expectEqual(@as(usize, 1), label_count);
+    try std.testing.expectEqual(1, label_count);
 
     // The best weight to a final state should be min(1.0, 2.0) = 1.0
     const a = start_arcs[0];

@@ -35,7 +35,7 @@ pub fn difference(comptime W: type, allocator: Allocator, a: *const mutable_fst_
     // No defer comp.deinit() — arena handles cleanup
 
     // Collect all labels used in b
-    var all_labels = std.AutoHashMapUnmanaged(Label, void){};
+    var all_labels: std.AutoHashMapUnmanaged(Label, void) = .empty;
 
     for (0..comp.numStates()) |i| {
         for (comp.arcs(@intCast(i))) |arc| {

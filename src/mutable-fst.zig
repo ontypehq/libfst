@@ -11,7 +11,7 @@ const Allocator = std.mem.Allocator;
 fn MutableState(comptime W: type) type {
     return struct {
         final_weight: W,
-        arcs: std.ArrayListUnmanaged(arc_mod.Arc(W)),
+        arcs: std.ArrayList(arc_mod.Arc(W)),
 
         const Self = @This();
 
@@ -47,7 +47,7 @@ pub fn MutableFst(comptime W: type) type {
 
     return struct {
         allocator: Allocator,
-        states: std.ArrayListUnmanaged(MutableState(W)),
+        states: std.ArrayList(MutableState(W)),
         start_state: StateId,
         /// Monotonically increasing counter; bumped on every structural mutation.
         /// Callers may snapshot this value and later assert it hasn't changed
@@ -199,7 +199,7 @@ pub fn MutableFst(comptime W: type) type {
         // ── Lifecycle ──
 
         pub fn clone(self: *const Self, allocator: Allocator) !Self {
-            var new_states = try std.ArrayListUnmanaged(MutableState(W)).initCapacity(allocator, self.states.items.len);
+            var new_states = try std.ArrayList(MutableState(W)).initCapacity(allocator, self.states.items.len);
             errdefer {
                 for (new_states.items) |*s| {
                     s.deinit(allocator);
@@ -219,7 +219,7 @@ pub fn MutableFst(comptime W: type) type {
 
         pub fn remapStates(self: *Self, mapping: []const StateId) !void {
             const old_states = self.states;
-            var new_states = try std.ArrayListUnmanaged(MutableState(W)).initCapacity(self.allocator, old_states.items.len);
+            var new_states = try std.ArrayList(MutableState(W)).initCapacity(self.allocator, old_states.items.len);
             errdefer {
                 for (new_states.items) |*s| {
                     s.deinit(self.allocator);
@@ -301,13 +301,13 @@ test "mutable-fst: basic construction" {
     try fst.addArc(s0, A.init(1, 1, W.init(0.5), s1));
     try fst.addArc(s1, A.init(2, 2, W.init(1.0), s2));
 
-    try std.testing.expectEqual(@as(usize, 3), fst.numStates());
+    try std.testing.expectEqual(3, fst.numStates());
     try std.testing.expectEqual(s0, fst.start());
     try std.testing.expect(fst.isFinal(s2));
     try std.testing.expect(!fst.isFinal(s0));
-    try std.testing.expectEqual(@as(usize, 1), fst.numArcs(s0));
-    try std.testing.expectEqual(@as(usize, 1), fst.numArcs(s1));
-    try std.testing.expectEqual(@as(usize, 0), fst.numArcs(s2));
+    try std.testing.expectEqual(1, fst.numArcs(s0));
+    try std.testing.expectEqual(1, fst.numArcs(s1));
+    try std.testing.expectEqual(0, fst.numArcs(s2));
 }
 
 test "mutable-fst: generation counter" {
@@ -318,7 +318,7 @@ test "mutable-fst: generation counter" {
     var fst = MutableFst(W).init(allocator);
     defer fst.deinit();
 
-    try std.testing.expectEqual(@as(u64, 0), fst.gen());
+    try std.testing.expectEqual(0, fst.gen());
 
     _ = try fst.addState();
     const g1 = fst.gen();
@@ -350,9 +350,9 @@ test "mutable-fst: delete arcs" {
     try fst.addArc(s0, A.init(1, 1, W.one, s1));
     try fst.addArc(s0, A.init(2, 2, W.one, s1));
 
-    try std.testing.expectEqual(@as(usize, 2), fst.numArcs(s0));
+    try std.testing.expectEqual(2, fst.numArcs(s0));
     fst.deleteArcs(s0);
-    try std.testing.expectEqual(@as(usize, 0), fst.numArcs(s0));
+    try std.testing.expectEqual(0, fst.numArcs(s0));
 }
 
 test "mutable-fst: delete states" {
@@ -364,10 +364,10 @@ test "mutable-fst: delete states" {
 
     _ = try fst.addState();
     _ = try fst.addState();
-    try std.testing.expectEqual(@as(usize, 2), fst.numStates());
+    try std.testing.expectEqual(2, fst.numStates());
 
     fst.deleteStates();
-    try std.testing.expectEqual(@as(usize, 0), fst.numStates());
+    try std.testing.expectEqual(0, fst.numStates());
     try std.testing.expectEqual(no_state, fst.start());
 }
 
@@ -388,15 +388,15 @@ test "mutable-fst: clone" {
     var fst2 = try fst.clone(allocator);
     defer fst2.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), fst2.numStates());
+    try std.testing.expectEqual(2, fst2.numStates());
     try std.testing.expectEqual(s0, fst2.start());
     try std.testing.expect(fst2.isFinal(s1));
-    try std.testing.expectEqual(@as(usize, 1), fst2.numArcs(s0));
-    try std.testing.expectEqual(@as(u64, 0), fst2.gen()); // fresh clone
+    try std.testing.expectEqual(1, fst2.numArcs(s0));
+    try std.testing.expectEqual(0, fst2.gen()); // fresh clone
 
     const a = fst2.arcs(s0)[0];
-    try std.testing.expectEqual(@as(Label, 1), a.ilabel);
-    try std.testing.expectEqual(@as(Label, 2), a.olabel);
+    try std.testing.expectEqual(1, a.ilabel);
+    try std.testing.expectEqual(2, a.olabel);
 }
 
 test "mutable-fst: sort arcs" {
@@ -415,9 +415,9 @@ test "mutable-fst: sort arcs" {
 
     fst.sortArcs(s0);
     const sorted = fst.arcs(s0);
-    try std.testing.expectEqual(@as(Label, 1), sorted[0].ilabel);
-    try std.testing.expectEqual(@as(Label, 2), sorted[1].ilabel);
-    try std.testing.expectEqual(@as(Label, 3), sorted[2].ilabel);
+    try std.testing.expectEqual(1, sorted[0].ilabel);
+    try std.testing.expectEqual(2, sorted[1].ilabel);
+    try std.testing.expectEqual(3, sorted[2].ilabel);
 }
 
 test "mutable-fst: totalArcs" {
@@ -434,5 +434,5 @@ test "mutable-fst: totalArcs" {
     try fst.addArc(s0, A.init(2, 2, W.one, s1));
     try fst.addArc(s1, A.init(3, 3, W.one, s0));
 
-    try std.testing.expectEqual(@as(usize, 3), fst.totalArcs());
+    try std.testing.expectEqual(3, fst.totalArcs());
 }

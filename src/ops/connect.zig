@@ -28,7 +28,7 @@ pub fn connect(comptime W: type, allocator: Allocator, fst: *const mutable_fst_m
     const accessible = try arena.alloc(bool, n);
     @memset(accessible, false);
     {
-        var queue = std.ArrayListUnmanaged(StateId).empty;
+        var queue = std.ArrayList(StateId).empty;
         defer queue.deinit(arena);
         accessible[fst.start()] = true;
         try queue.append(arena, fst.start());
@@ -44,7 +44,7 @@ pub fn connect(comptime W: type, allocator: Allocator, fst: *const mutable_fst_m
     }
 
     // Step 2: Build reverse adjacency list
-    var rev = try arena.alloc(std.ArrayListUnmanaged(StateId), n);
+    var rev = try arena.alloc(std.ArrayList(StateId), n);
     for (0..n) |i| rev[i] = .empty;
     for (0..n) |i| {
         const s: StateId = @intCast(i);
@@ -59,7 +59,7 @@ pub fn connect(comptime W: type, allocator: Allocator, fst: *const mutable_fst_m
     const coaccessible = try arena.alloc(bool, n);
     @memset(coaccessible, false);
     {
-        var queue = std.ArrayListUnmanaged(StateId).empty;
+        var queue = std.ArrayList(StateId).empty;
         defer queue.deinit(arena);
         for (0..n) |i| {
             const s: StateId = @intCast(i);
@@ -145,7 +145,7 @@ test "connect: removes dead states" {
     defer result.deinit();
 
     // Should only have 3 states (0, 1, 2) — state 3 removed
-    try std.testing.expectEqual(@as(u32, 3), result.numStates());
+    try std.testing.expectEqual(3, result.numStates());
     try std.testing.expect(result.start() != no_state);
 }
 
@@ -164,7 +164,7 @@ test "connect: preserves fully connected FST" {
     var result = try connect(TW, allocator, &fst);
     defer result.deinit();
 
-    try std.testing.expectEqual(@as(u32, 2), result.numStates());
+    try std.testing.expectEqual(2, result.numStates());
 }
 
 test "connect: empty FST" {

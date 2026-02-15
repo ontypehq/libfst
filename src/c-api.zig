@@ -37,8 +37,8 @@ const invalid_handle: u32 = std.math.maxInt(u32);
 
 fn HandleTable(comptime T: type) type {
     return struct {
-        slots: std.ArrayListUnmanaged(?*T) = .{},
-        free_list: std.ArrayListUnmanaged(u32) = .{},
+        slots: std.ArrayList(?*T) = .empty,
+        free_list: std.ArrayList(u32) = .empty,
 
         const Self = @This();
 

@@ -54,9 +54,9 @@ pub fn compose(comptime W: type, allocator: Allocator, fst1: anytype, fst2: anyt
         }
     };
 
-    var state_map = std.AutoHashMapUnmanaged(u64, StateId){};
+    var state_map: std.AutoHashMapUnmanaged(u64, StateId) = .empty;
 
-    var queue = std.ArrayListUnmanaged(StateTuple){};
+    var queue: std.ArrayList(StateTuple) = .empty;
 
     // Initial state
     const init_tuple = StateTuple{ .s1 = fst1.start(), .s2 = fst2.start(), .filter = 0 };
@@ -82,7 +82,7 @@ pub fn compose(comptime W: type, allocator: Allocator, fst1: anytype, fst2: anyt
             fn call(
                 res: *mutable_fst_mod.MutableFst(W),
                 smap: *std.AutoHashMapUnmanaged(u64, StateId),
-                q: *std.ArrayListUnmanaged(StateTuple),
+                q: *std.ArrayList(StateTuple),
                 alloc: Allocator,
                 tuple: StateTuple,
             ) !StateId {

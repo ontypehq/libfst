@@ -258,13 +258,13 @@ test "fst: freeze and query" {
     var frozen = try Fst(W).fromMutable(allocator, &mfst);
     defer frozen.deinit();
 
-    try std.testing.expectEqual(@as(u32, 0), frozen.start());
-    try std.testing.expectEqual(@as(u32, 3), frozen.numStates());
+    try std.testing.expectEqual(0, frozen.start());
+    try std.testing.expectEqual(3, frozen.numStates());
     try std.testing.expect(frozen.isFinal(2));
     try std.testing.expect(!frozen.isFinal(0));
-    try std.testing.expectEqual(@as(u32, 1), frozen.numArcs(0));
-    try std.testing.expectEqual(@as(u32, 1), frozen.numArcs(1));
-    try std.testing.expectEqual(@as(u32, 0), frozen.numArcs(2));
+    try std.testing.expectEqual(1, frozen.numArcs(0));
+    try std.testing.expectEqual(1, frozen.numArcs(1));
+    try std.testing.expectEqual(0, frozen.numArcs(2));
 }
 
 test "fst: findArc binary search" {
@@ -289,7 +289,7 @@ test "fst: findArc binary search" {
     // Find existing arc
     const found = frozen.findArc(0, 10);
     try std.testing.expect(found != null);
-    try std.testing.expectEqual(@as(u32, 10), found.?.ilabel);
+    try std.testing.expectEqual(10, found.?.ilabel);
 
     // Find non-existing arc
     const not_found = frozen.findArc(0, 7);

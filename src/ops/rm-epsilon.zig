@@ -32,13 +32,13 @@ pub fn rmEpsilon(comptime W: type, allocator: Allocator, fst: *const mutable_fst
     result.setStart(fst.start());
 
     // Temp buffers for epsilon closure computation
-    var closure_states = std.ArrayListUnmanaged(StateId){};
-    var closure_weights = std.ArrayListUnmanaged(W){};
+    var closure_states: std.ArrayList(StateId) = .empty;
+    var closure_weights: std.ArrayList(W) = .empty;
 
     var visited = try arena.alloc(bool, num_states);
 
-    var stack_s = std.ArrayListUnmanaged(StateId){};
-    var stack_w = std.ArrayListUnmanaged(W){};
+    var stack_s: std.ArrayList(StateId) = .empty;
+    var stack_w: std.ArrayList(W) = .empty;
 
     for (0..num_states) |i| {
         const s: StateId = @intCast(i);

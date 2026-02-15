@@ -74,10 +74,10 @@ test "arc: basic construction" {
     const W = @import("weight.zig").TropicalWeight;
     const A = Arc(W);
     const a = A.init(1, 2, W.init(3.0), 4);
-    try std.testing.expectEqual(@as(Label, 1), a.ilabel);
-    try std.testing.expectEqual(@as(Label, 2), a.olabel);
+    try std.testing.expectEqual(1, a.ilabel);
+    try std.testing.expectEqual(2, a.olabel);
     try std.testing.expect(a.weight.eql(W.init(3.0)));
-    try std.testing.expectEqual(@as(StateId, 4), a.nextstate);
+    try std.testing.expectEqual(4, a.nextstate);
 }
 
 test "arc: epsilon" {
@@ -108,7 +108,7 @@ test "arc: sort by ilabel" {
         A.init(2, 0, W.one, 0),
     };
     std.mem.sort(A, &arcs, {}, A.compareByIlabel);
-    try std.testing.expectEqual(@as(Label, 1), arcs[0].ilabel);
-    try std.testing.expectEqual(@as(Label, 2), arcs[1].ilabel);
-    try std.testing.expectEqual(@as(Label, 3), arcs[2].ilabel);
+    try std.testing.expectEqual(1, arcs[0].ilabel);
+    try std.testing.expectEqual(2, arcs[1].ilabel);
+    try std.testing.expectEqual(3, arcs[2].ilabel);
 }

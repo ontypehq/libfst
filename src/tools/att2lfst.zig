@@ -27,7 +27,7 @@ fn parseArgs(args: []const []const u8) !struct { input: []const u8, output: []co
 }
 
 pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 

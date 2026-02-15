@@ -119,7 +119,7 @@ test "closure: star" {
 
     // New start should have epsilon arc to old start
     const start_arcs = fst.arcs(fst.start());
-    try std.testing.expectEqual(@as(usize, 1), start_arcs.len);
+    try std.testing.expectEqual(1, start_arcs.len);
     try std.testing.expect(start_arcs[0].isEpsilon());
 }
 

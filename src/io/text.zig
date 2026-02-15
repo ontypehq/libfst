@@ -186,25 +186,25 @@ test "text: roundtrip simple FST" {
 
     // Write
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try writeText(W, &fst, stream.writer());
-    const output = stream.getWritten();
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeText(W, &fst, &w);
+    const output = w.buffered();
 
     // Read back
     var fst2 = try readText(W, allocator, output);
     defer fst2.deinit();
 
-    try std.testing.expectEqual(@as(usize, 3), fst2.numStates());
-    try std.testing.expectEqual(@as(StateId, 0), fst2.start());
+    try std.testing.expectEqual(3, fst2.numStates());
+    try std.testing.expectEqual(0, fst2.start());
     try std.testing.expect(fst2.isFinal(2));
     try std.testing.expect(!fst2.isFinal(0));
-    try std.testing.expectEqual(@as(usize, 1), fst2.numArcs(0));
-    try std.testing.expectEqual(@as(usize, 1), fst2.numArcs(1));
+    try std.testing.expectEqual(1, fst2.numArcs(0));
+    try std.testing.expectEqual(1, fst2.numArcs(1));
 
     const a0 = fst2.arcs(0)[0];
-    try std.testing.expectEqual(@as(Label, 1), a0.ilabel);
-    try std.testing.expectEqual(@as(Label, 2), a0.olabel);
-    try std.testing.expectEqual(@as(StateId, 1), a0.nextstate);
+    try std.testing.expectEqual(1, a0.ilabel);
+    try std.testing.expectEqual(2, a0.olabel);
+    try std.testing.expectEqual(1, a0.nextstate);
 }
 
 test "text: parse AT&T format" {
@@ -216,10 +216,10 @@ test "text: parse AT&T format" {
     var fst = try readText(W, allocator, input);
     defer fst.deinit();
 
-    try std.testing.expectEqual(@as(usize, 3), fst.numStates());
-    try std.testing.expectEqual(@as(StateId, 0), fst.start());
+    try std.testing.expectEqual(3, fst.numStates());
+    try std.testing.expectEqual(0, fst.start());
     try std.testing.expect(fst.isFinal(2));
-    try std.testing.expectEqual(@as(usize, 1), fst.numArcs(0));
+    try std.testing.expectEqual(1, fst.numArcs(0));
 }
 
 test "text: final state with weight" {

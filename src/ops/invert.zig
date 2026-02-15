@@ -36,8 +36,8 @@ test "invert: swap labels" {
     invert(W, &fst);
 
     const a = fst.arcs(s0)[0];
-    try std.testing.expectEqual(@as(arc_mod.Label, 2), a.ilabel);
-    try std.testing.expectEqual(@as(arc_mod.Label, 1), a.olabel);
+    try std.testing.expectEqual(2, a.ilabel);
+    try std.testing.expectEqual(1, a.olabel);
 }
 
 test "invert: double invert is identity" {
@@ -58,6 +58,6 @@ test "invert: double invert is identity" {
     invert(W, &fst);
 
     const a = fst.arcs(s0)[0];
-    try std.testing.expectEqual(@as(arc_mod.Label, 5), a.ilabel);
-    try std.testing.expectEqual(@as(arc_mod.Label, 10), a.olabel);
+    try std.testing.expectEqual(5, a.ilabel);
+    try std.testing.expectEqual(10, a.olabel);
 }

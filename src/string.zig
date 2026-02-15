@@ -50,7 +50,7 @@ pub fn printString(comptime W: type, allocator: Allocator, fst: *const mutable_f
     const start_s = fst.start();
     if (start_s == no_state) return null;
 
-    var result = std.ArrayListUnmanaged(u8){};
+    var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
 
     var current = start_s;
@@ -81,8 +81,8 @@ test "string: compile and print roundtrip" {
     var fst = try compileString(W, allocator, "hello");
     defer fst.deinit();
 
-    try std.testing.expectEqual(@as(usize, 6), fst.numStates()); // 5 chars + final
-    try std.testing.expectEqual(@as(StateId, 0), fst.start());
+    try std.testing.expectEqual(6, fst.numStates()); // 5 chars + final
+    try std.testing.expectEqual(0, fst.start());
     try std.testing.expect(fst.isFinal(5));
 
     const s = try printString(W, allocator, &fst);
@@ -97,12 +97,12 @@ test "string: empty string" {
     var fst = try compileString(W, allocator, "");
     defer fst.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), fst.numStates());
+    try std.testing.expectEqual(1, fst.numStates());
     try std.testing.expect(fst.isFinal(0));
 
     const s = try printString(W, allocator, &fst);
     defer allocator.free(s.?);
-    try std.testing.expectEqual(@as(usize, 0), s.?.len);
+    try std.testing.expectEqual(0, s.?.len);
 }
 
 test "string: transducer different lengths" {
@@ -113,18 +113,18 @@ test "string: transducer different lengths" {
     defer fst.deinit();
 
     // max(2, 3) = 3 arcs, 4 states
-    try std.testing.expectEqual(@as(usize, 4), fst.numStates());
+    try std.testing.expectEqual(4, fst.numStates());
     try std.testing.expect(fst.isFinal(3));
 
     // First arc: a -> x
     const a0 = fst.arcs(0)[0];
-    try std.testing.expectEqual(@as(Label, 'a' + 1), a0.ilabel);
-    try std.testing.expectEqual(@as(Label, 'x' + 1), a0.olabel);
+    try std.testing.expectEqual('a' + 1, a0.ilabel);
+    try std.testing.expectEqual('x' + 1, a0.olabel);
 
     // Third arc: eps -> z (input exhausted)
     const a2 = fst.arcs(2)[0];
     try std.testing.expectEqual(arc_mod.epsilon, a2.ilabel);
-    try std.testing.expectEqual(@as(Label, 'z' + 1), a2.olabel);
+    try std.testing.expectEqual('z' + 1, a2.olabel);
 }
 
 test "string: UTF-8 bytes" {
@@ -135,7 +135,7 @@ test "string: UTF-8 bytes" {
     var fst = try compileString(W, allocator, input);
     defer fst.deinit();
 
-    try std.testing.expectEqual(@as(usize, 4), fst.numStates()); // 3 bytes + final
+    try std.testing.expectEqual(4, fst.numStates()); // 3 bytes + final
 
     const s = try printString(W, allocator, &fst);
     defer allocator.free(s.?);

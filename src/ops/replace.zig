@@ -46,13 +46,13 @@ pub fn replace(comptime W: type, allocator: Allocator, root: *const mutable_fst_
     const arena = arena_state.allocator();
 
     // Build label -> index mapping
-    var label_to_idx = std.AutoHashMapUnmanaged(Label, usize){};
+    var label_to_idx: std.AutoHashMapUnmanaged(Label, usize) = .empty;
     for (pairs, 0..) |pair, i| {
         try label_to_idx.put(arena, pair.label, i);
     }
 
     // 1. Build dependency graph: for each pair, which other pair labels does it reference?
-    const dep_lists = try arena.alloc(std.ArrayListUnmanaged(usize), pairs.len);
+    const dep_lists = try arena.alloc(std.ArrayList(usize), pairs.len);
     for (dep_lists) |*dl| dl.* = .empty;
 
     for (pairs, 0..) |pair, i| {
@@ -127,7 +127,7 @@ pub fn replace(comptime W: type, allocator: Allocator, root: *const mutable_fst_
     return result;
 }
 
-fn hasCycleDFS(dep_lists: []const std.ArrayListUnmanaged(usize), colors: []DfsColor, node: usize) bool {
+fn hasCycleDFS(dep_lists: []const std.ArrayList(usize), colors: []DfsColor, node: usize) bool {
     colors[node] = .gray;
     for (dep_lists[node].items) |dep| {
         if (colors[dep] == .gray) return true; // back edge = cycle
@@ -139,7 +139,7 @@ fn hasCycleDFS(dep_lists: []const std.ArrayListUnmanaged(usize), colors: []DfsCo
     return false;
 }
 
-fn topoSortDFS(dep_lists: []const std.ArrayListUnmanaged(usize), visited: []bool, order: []usize, count: *usize, node: usize) void {
+fn topoSortDFS(dep_lists: []const std.ArrayList(usize), visited: []bool, order: []usize, count: *usize, node: usize) void {
     visited[node] = true;
     for (dep_lists[node].items) |dep| {
         if (!visited[dep]) {
@@ -166,7 +166,7 @@ fn inlineAllRefs(
 
     // Collect replacement info: (src_state, arc_index, pair_index)
     const Replacement = struct { src: StateId, arc_idx: usize, pair_idx: usize };
-    var replacements = std.ArrayListUnmanaged(Replacement){};
+    var replacements: std.ArrayList(Replacement) = .empty;
     defer replacements.deinit(allocator);
 
     for (0..orig_num_states) |i| {
@@ -185,7 +185,7 @@ fn inlineAllRefs(
 
     // Group replacements by source state
     const ArcReplacement = struct { arc_idx: usize, pair_idx: usize };
-    var states_with_replacements = std.AutoHashMapUnmanaged(StateId, std.ArrayListUnmanaged(ArcReplacement)){};
+    var states_with_replacements: std.AutoHashMapUnmanaged(StateId, std.ArrayList(ArcReplacement)) = .empty;
     defer {
         var it = states_with_replacements.valueIterator();
         while (it.next()) |v| v.deinit(allocator);
@@ -206,14 +206,14 @@ fn inlineAllRefs(
         const orig_arcs = fst.arcs(src_state);
 
         // Build set of arc indices to replace
-        var replace_set = std.AutoHashMapUnmanaged(usize, usize){};
+        var replace_set: std.AutoHashMapUnmanaged(usize, usize) = .empty;
         defer replace_set.deinit(allocator);
         for (state_replacements) |r| {
             try replace_set.put(allocator, r.arc_idx, r.pair_idx);
         }
 
         // Collect new arcs for this state
-        var new_arcs = std.ArrayListUnmanaged(A){};
+        var new_arcs: std.ArrayList(A) = .empty;
         defer new_arcs.deinit(allocator);
 
         for (orig_arcs, 0..) |a, ai| {

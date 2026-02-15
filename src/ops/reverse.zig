@@ -90,22 +90,22 @@ test "reverse: single arc" {
     defer rev.deinit();
 
     // Super-start = state 2, original start (0) is final
-    try std.testing.expectEqual(@as(StateId, 2), rev.start());
+    try std.testing.expectEqual(2, rev.start());
     try std.testing.expect(rev.isFinal(0));
     try std.testing.expect(!rev.isFinal(1));
 
     // Super-start has epsilon arc to state 1 (original final)
     const start_arcs = rev.arcs(rev.start());
-    try std.testing.expectEqual(@as(usize, 1), start_arcs.len);
+    try std.testing.expectEqual(1, start_arcs.len);
     try std.testing.expect(start_arcs[0].isEpsilon());
-    try std.testing.expectEqual(@as(StateId, 1), start_arcs[0].nextstate);
+    try std.testing.expectEqual(1, start_arcs[0].nextstate);
 
     // State 1 has reversed arc to state 0
     const s1_arcs = rev.arcs(1);
-    try std.testing.expectEqual(@as(usize, 1), s1_arcs.len);
-    try std.testing.expectEqual(@as(Label, 1), s1_arcs[0].ilabel);
-    try std.testing.expectEqual(@as(Label, 2), s1_arcs[0].olabel);
-    try std.testing.expectEqual(@as(StateId, 0), s1_arcs[0].nextstate);
+    try std.testing.expectEqual(1, s1_arcs.len);
+    try std.testing.expectEqual(1, s1_arcs[0].ilabel);
+    try std.testing.expectEqual(2, s1_arcs[0].olabel);
+    try std.testing.expectEqual(0, s1_arcs[0].nextstate);
 }
 
 test "reverse: empty FST" {
@@ -161,8 +161,8 @@ test "reverse: linear chain" {
     defer rev.deinit();
 
     // 4 states: 0, 1, 2, super-start(3)
-    try std.testing.expectEqual(@as(usize, 4), rev.numStates());
-    try std.testing.expectEqual(@as(StateId, 3), rev.start());
+    try std.testing.expectEqual(4, rev.numStates());
+    try std.testing.expectEqual(3, rev.start());
 
     // State 0 is final (was original start)
     try std.testing.expect(rev.isFinal(0));

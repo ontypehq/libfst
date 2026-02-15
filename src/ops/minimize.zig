@@ -27,10 +27,10 @@ pub fn minimize(comptime W: type, allocator: Allocator, fst: *mutable_fst_mod.Mu
     // Group states by their "signature": (final_weight, sorted arcs pattern)
     var partition = try arena.alloc(u32, num);
 
-    var sig_map = std.StringHashMapUnmanaged(u32){};
+    var sig_map: std.StringHashMapUnmanaged(u32) = .empty;
 
     var next_class: u32 = 0;
-    var sig_buf = std.ArrayListUnmanaged(u8){};
+    var sig_buf: std.ArrayList(u8) = .empty;
 
     for (0..num) |i| {
         const s: StateId = @intCast(i);
@@ -175,7 +175,7 @@ test "minimize: merge equivalent states" {
     try minimize(W, allocator, &fst);
 
     // States 1 and 2 should be merged
-    try std.testing.expectEqual(@as(usize, 2), fst.numStates());
+    try std.testing.expectEqual(2, fst.numStates());
 }
 
 test "minimize: idempotent" {

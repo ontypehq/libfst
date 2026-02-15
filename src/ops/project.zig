@@ -44,8 +44,8 @@ test "project: input" {
     project(W, &fst, .input);
 
     const a = fst.arcs(s0)[0];
-    try std.testing.expectEqual(@as(arc_mod.Label, 1), a.ilabel);
-    try std.testing.expectEqual(@as(arc_mod.Label, 1), a.olabel);
+    try std.testing.expectEqual(1, a.ilabel);
+    try std.testing.expectEqual(1, a.olabel);
 }
 
 test "project: output" {
@@ -65,6 +65,6 @@ test "project: output" {
     project(W, &fst, .output);
 
     const a = fst.arcs(s0)[0];
-    try std.testing.expectEqual(@as(arc_mod.Label, 2), a.ilabel);
-    try std.testing.expectEqual(@as(arc_mod.Label, 2), a.olabel);
+    try std.testing.expectEqual(2, a.ilabel);
+    try std.testing.expectEqual(2, a.olabel);
 }

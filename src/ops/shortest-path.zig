@@ -86,7 +86,7 @@ pub fn shortestPath(comptime W: type, allocator: Allocator, fst: *const mutable_
         state: StateId,
         total_weight: W,
     };
-    var candidates = std.ArrayListUnmanaged(FinalCandidate){};
+    var candidates: std.ArrayList(FinalCandidate) = .empty;
 
     for (0..num_states) |i| {
         const s: StateId = @intCast(i);
@@ -122,7 +122,7 @@ pub fn shortestPath(comptime W: type, allocator: Allocator, fst: *const mutable_
     if (take == 1) {
         // Trace back single best path
         const best_final = candidates.items[0].state;
-        var path = std.ArrayListUnmanaged(StateId){};
+        var path: std.ArrayList(StateId) = .empty;
 
         var current = best_final;
         try path.append(arena, current);
@@ -153,11 +153,11 @@ pub fn shortestPath(comptime W: type, allocator: Allocator, fst: *const mutable_
     } else {
         // For n > 1, build a tree with multiple paths
         // Each path shares common prefixes
-        var state_map = std.AutoHashMapUnmanaged(StateId, StateId){};
+        var state_map: std.AutoHashMapUnmanaged(StateId, StateId) = .empty;
 
         for (0..take) |ci| {
             const best_final = candidates.items[ci].state;
-            var path = std.ArrayListUnmanaged(StateId){};
+            var path: std.ArrayList(StateId) = .empty;
 
             var current = best_final;
             try path.append(arena, current);
@@ -242,7 +242,7 @@ test "shortest-path: single best path" {
     try std.testing.expect(result.start() != no_state);
 
     // Should be a linear chain of 3 states
-    try std.testing.expectEqual(@as(usize, 3), result.numStates());
+    try std.testing.expectEqual(3, result.numStates());
 
     // First arc should have weight 1.0
     const first_arc = result.arcs(result.start())[0];

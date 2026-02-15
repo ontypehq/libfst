@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 pub const SymbolTable = struct {
     allocator: Allocator,
     /// Label -> owned symbol string
-    id_to_sym: std.ArrayListUnmanaged([]const u8),
+    id_to_sym: std.ArrayList([]const u8),
     /// Symbol string -> Label
     sym_to_id: std.StringHashMapUnmanaged(Label),
     /// Next label to assign (starts at 1; 0 = epsilon reserved)
@@ -113,7 +113,7 @@ test "sym: add and lookup" {
     try std.testing.expectEqualStrings("world", syms.findLabel(b).?);
     try std.testing.expectEqual(a, syms.findSymbol("hello").?);
     try std.testing.expectEqual(b, syms.findSymbol("world").?);
-    try std.testing.expectEqual(@as(?Label, null), syms.findSymbol("missing"));
+    try std.testing.expectEqual(null, syms.findSymbol("missing"));
 }
 
 test "sym: epsilon label" {
@@ -134,7 +134,7 @@ test "sym: add with specific label" {
 
     try std.testing.expectEqualStrings("a", syms.findLabel(5).?);
     try std.testing.expectEqualStrings("b", syms.findLabel(10).?);
-    try std.testing.expectEqual(@as(Label, 5), syms.findSymbol("a").?);
+    try std.testing.expectEqual(5, syms.findSymbol("a").?);
 }
 
 test "sym: numSymbols" {
@@ -142,11 +142,11 @@ test "sym: numSymbols" {
     var syms = SymbolTable.init(allocator);
     defer syms.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), syms.numSymbols());
+    try std.testing.expectEqual(0, syms.numSymbols());
     _ = try syms.addSymbol("a");
-    try std.testing.expectEqual(@as(usize, 1), syms.numSymbols());
+    try std.testing.expectEqual(1, syms.numSymbols());
     _ = try syms.addSymbol("b");
-    try std.testing.expectEqual(@as(usize, 2), syms.numSymbols());
+    try std.testing.expectEqual(2, syms.numSymbols());
     _ = try syms.addSymbol("a"); // duplicate
-    try std.testing.expectEqual(@as(usize, 2), syms.numSymbols());
+    try std.testing.expectEqual(2, syms.numSymbols());
 }
