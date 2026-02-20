@@ -145,7 +145,7 @@ test "prop: freeze roundtrip preserves data" {
         defer frozen.deinit();
 
         // Same number of states
-        try std.testing.expectEqual(@intCast(fst.numStates()), frozen.numStates());
+        try std.testing.expectEqual(@as(u32, @intCast(fst.numStates())), frozen.numStates());
         // Same start
         try std.testing.expectEqual(fst.start(), frozen.start());
 

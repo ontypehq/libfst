@@ -40,6 +40,8 @@ fn HandleTable(comptime T: type) type {
         slots: std.ArrayList(?*T) = .empty,
         free_list: std.ArrayList(u32) = .empty,
         generations: std.ArrayList(u32) = .empty,
+        pin_counts: std.ArrayList(u32) = .empty,
+        pending_free: std.ArrayList(bool) = .empty,
 
         const Self = @This();
 
@@ -50,10 +52,23 @@ fn HandleTable(comptime T: type) type {
                 self.generations.items[idx] +%= 1;
                 if (self.generations.items[idx] == 0) self.generations.items[idx] = 1;
                 self.slots.items[idx] = ptr;
+                self.pin_counts.items[idx] = 0;
+                self.pending_free.items[idx] = false;
                 return idx;
             }
             self.slots.append(alloc, ptr) catch return invalid_handle;
             self.generations.append(alloc, 1) catch {
+                _ = self.slots.pop();
+                return invalid_handle;
+            };
+            self.pin_counts.append(alloc, 0) catch {
+                _ = self.generations.pop();
+                _ = self.slots.pop();
+                return invalid_handle;
+            };
+            self.pending_free.append(alloc, false) catch {
+                _ = self.pin_counts.pop();
+                _ = self.generations.pop();
                 _ = self.slots.pop();
                 return invalid_handle;
             };
@@ -63,12 +78,14 @@ fn HandleTable(comptime T: type) type {
         /// Caller MUST hold `api_mutex`.
         fn get(self: *Self, handle: u32) ?*T {
             if (handle >= self.slots.items.len) return null;
+            if (self.pending_free.items[handle]) return null;
             return self.slots.items[handle];
         }
 
         /// Caller MUST hold `api_mutex`.
         fn getConst(self: *Self, handle: u32) ?*const T {
             if (handle >= self.slots.items.len) return null;
+            if (self.pending_free.items[handle]) return null;
             return self.slots.items[handle];
         }
 
@@ -86,10 +103,50 @@ fn HandleTable(comptime T: type) type {
             return true;
         }
 
+        /// Pin a handle for lock-free read access.
+        /// While pinned, remove() defers destruction until unpin().
+        /// Caller MUST hold `api_mutex`.
+        fn pinConst(self: *Self, handle: u32) ?*const T {
+            if (handle >= self.slots.items.len) return null;
+            if (self.pending_free.items[handle]) return null;
+            const ptr = self.slots.items[handle] orelse return null;
+            self.pin_counts.items[handle] +%= 1;
+            if (self.pin_counts.items[handle] == 0) self.pin_counts.items[handle] = 1;
+            return ptr;
+        }
+
+        /// Release a previously pinned handle.
+        /// Caller MUST hold `api_mutex`.
+        fn unpin(self: *Self, handle: u32, deinit_fn: *const fn (*T) void) bool {
+            if (handle >= self.slots.items.len) return false;
+            if (self.pin_counts.items[handle] == 0) return false;
+            self.pin_counts.items[handle] -= 1;
+            if (self.pin_counts.items[handle] != 0) return true;
+            if (!self.pending_free.items[handle]) return true;
+
+            const ptr = self.slots.items[handle] orelse {
+                self.pending_free.items[handle] = false;
+                return false;
+            };
+            deinit_fn(ptr);
+            alloc.destroy(ptr);
+            self.slots.items[handle] = null;
+            self.pending_free.items[handle] = false;
+            _ = self.bumpGeneration(handle);
+            self.free_list.append(alloc, handle) catch {};
+            return true;
+        }
+
         /// Remove and destroy the object. Caller MUST hold `api_mutex`.
         fn remove(self: *Self, handle: u32, deinit_fn: *const fn (*T) void) bool {
             if (handle >= self.slots.items.len) return false;
+            if (self.pending_free.items[handle]) return false;
             const ptr = self.slots.items[handle] orelse return false;
+            if (self.pin_counts.items[handle] > 0) {
+                self.pending_free.items[handle] = true;
+                _ = self.bumpGeneration(handle);
+                return true;
+            }
             deinit_fn(ptr);
             alloc.destroy(ptr);
             self.slots.items[handle] = null;
@@ -107,7 +164,8 @@ var mutable_table: HandleTable(MutableFst) = .{};
 var fst_table: HandleTable(Fst) = .{};
 
 /// Global mutex protects handle tables and short critical sections.
-/// Heavy algorithms run outside this lock using copied snapshots.
+/// Heavy algorithms run outside this lock using mutable snapshots and
+/// optionally pinned immutable handles.
 var api_mutex: std.Thread.Mutex = .{};
 
 fn mutableDeinit(ptr: *MutableFst) void {
@@ -135,6 +193,8 @@ export fn fst_teardown() callconv(.c) void {
     mutable_table.slots.deinit(alloc);
     mutable_table.free_list.deinit(alloc);
     mutable_table.generations.deinit(alloc);
+    mutable_table.pin_counts.deinit(alloc);
+    mutable_table.pending_free.deinit(alloc);
     mutable_table = .{};
 
     // Free all remaining frozen FSTs
@@ -148,6 +208,8 @@ export fn fst_teardown() callconv(.c) void {
     fst_table.slots.deinit(alloc);
     fst_table.free_list.deinit(alloc);
     fst_table.generations.deinit(alloc);
+    fst_table.pin_counts.deinit(alloc);
+    fst_table.pending_free.deinit(alloc);
     fst_table = .{};
 }
 
@@ -485,21 +547,20 @@ export fn fst_compose_frozen(a_handle: u32, b_handle: u32) callconv(.c) u32 {
         api_mutex.unlock();
         return invalid_handle;
     };
-    const hb = fst_table.getConst(b_handle) orelse {
-        a_snapshot.deinit();
-        api_mutex.unlock();
-        return invalid_handle;
-    };
-    var b_snapshot = cloneFstOwned(hb) catch {
+    const hb = fst_table.pinConst(b_handle) orelse {
         a_snapshot.deinit();
         api_mutex.unlock();
         return invalid_handle;
     };
     api_mutex.unlock();
     defer a_snapshot.deinit();
-    defer b_snapshot.deinit();
+    defer {
+        api_mutex.lock();
+        _ = fst_table.unpin(b_handle, &fstDeinit);
+        api_mutex.unlock();
+    }
 
-    var result = compose_mod.compose(W, alloc, &a_snapshot, &b_snapshot) catch return invalid_handle;
+    var result = compose_mod.compose(W, alloc, &a_snapshot, hb) catch return invalid_handle;
     api_mutex.lock();
     const h = newMutableHandle(result);
     api_mutex.unlock();

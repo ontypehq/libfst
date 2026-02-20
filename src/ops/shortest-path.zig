@@ -2,9 +2,7 @@ const std = @import("std");
 const arc_mod = @import("../arc.zig");
 const mutable_fst_mod = @import("../mutable-fst.zig");
 
-const Label = arc_mod.Label;
 const StateId = arc_mod.StateId;
-const epsilon = arc_mod.epsilon;
 const no_state = arc_mod.no_state;
 const Allocator = std.mem.Allocator;
 
@@ -30,7 +28,7 @@ pub fn shortestPath(comptime W: type, allocator: Allocator, fst: *const mutable_
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // Dijkstra's algorithm to find shortest distances
+    // Dijkstra's algorithm to find shortest distances.
     const num_states = fst.numStates();
 
     // Distance to each state
@@ -46,41 +44,43 @@ pub fn shortestPath(comptime W: type, allocator: Allocator, fst: *const mutable_
     var back = try arena.alloc(?BackPtr, num_states);
     @memset(back, null);
 
-    // Visited set
-    var visited = try arena.alloc(bool, num_states);
-    @memset(visited, false);
+    var settled = try arena.alloc(bool, num_states);
+    @memset(settled, false);
 
-    // Simple priority queue (process states in order of distance)
-    // For tropical semiring, lower weight = better = higher priority
-    for (0..num_states) |_| {
-        // Find unvisited state with best (minimum) distance
-        var best: StateId = no_state;
-        var best_dist = W.zero;
-        for (0..num_states) |i| {
-            const s: StateId = @intCast(i);
-            if (visited[s]) continue;
-            if (dist[s].isZero()) continue;
-            if (best == no_state or
-                W.compare(dist[s], best_dist) == .lt or
-                (W.compare(dist[s], best_dist) == .eq and s < best))
-            {
-                best = s;
-                best_dist = dist[s];
-            }
+    const QueueItem = struct {
+        state: StateId,
+        dist: W,
+    };
+    const queueCompare = struct {
+        fn call(_: void, a: QueueItem, b: QueueItem) std.math.Order {
+            const by_dist = W.compare(a.dist, b.dist);
+            if (by_dist != .eq) return by_dist;
+            return std.math.order(a.state, b.state);
         }
+    }.call;
+    var queue = std.PriorityQueue(QueueItem, void, queueCompare).init(arena, {});
+    try queue.add(.{ .state = fst.start(), .dist = W.one });
 
-        if (best == no_state) break;
-        visited[best] = true;
+    while (queue.removeOrNull()) |item| {
+        const s = item.state;
+        if (settled[s]) continue;
+        if (W.compare(item.dist, dist[s]) != .eq) continue; // stale queue entry
+        settled[s] = true;
 
-        // Relax edges
-        for (fst.arcs(best), 0..) |a, ai| {
-            const new_dist = W.times(dist[best], a.weight);
-            if (dist[a.nextstate].isZero() or
-                W.compare(new_dist, dist[a.nextstate]) == .lt or
-                (W.compare(new_dist, dist[a.nextstate]) == .eq and best < (if (back[a.nextstate]) |bp| bp.prev_state else no_state)))
-            {
-                dist[a.nextstate] = new_dist;
-                back[a.nextstate] = .{ .prev_state = best, .arc_idx = @intCast(ai) };
+        for (fst.arcs(s), 0..) |a, ai| {
+            const next = a.nextstate;
+            const new_dist = W.times(dist[s], a.weight);
+            const old_dist = dist[next];
+            const by_dist = W.compare(new_dist, old_dist);
+            const prev_state = if (back[next]) |bp| bp.prev_state else no_state;
+            const better_tie = by_dist == .eq and (prev_state == no_state or s < prev_state);
+
+            if (old_dist.isZero() or by_dist == .lt or better_tie) {
+                dist[next] = new_dist;
+                back[next] = .{ .prev_state = s, .arc_idx = @intCast(ai) };
+                if (!settled[next]) {
+                    try queue.add(.{ .state = next, .dist = new_dist });
+                }
             }
         }
     }
@@ -109,30 +109,30 @@ pub fn shortestPath(comptime W: type, allocator: Allocator, fst: *const mutable_
     // Build result: trace back the best path.
     var result = mutable_fst_mod.MutableFst(W).init(allocator);
     errdefer result.deinit();
-    var path: std.ArrayList(StateId) = .empty;
-
+    var reverse_edges: std.ArrayList(BackPtr) = .empty;
     var current = best_final;
-    try path.append(arena, current);
     while (back[current]) |bp| {
-        try path.append(arena, bp.prev_state);
+        try reverse_edges.append(arena, bp);
         current = bp.prev_state;
     }
 
-    std.mem.reverse(StateId, path.items);
+    // If best_final is reachable, backtrace must end at the start state.
+    if (current != fst.start()) {
+        return mutable_fst_mod.MutableFst(W).init(allocator);
+    }
 
-    try result.addStates(path.items.len);
+    try result.addStates(reverse_edges.items.len + 1);
     result.setStart(0);
-    result.setFinal(@intCast(path.items.len - 1), fst.finalWeight(best_final));
+    result.setFinal(@intCast(reverse_edges.items.len), fst.finalWeight(best_final));
 
-    for (0..path.items.len - 1) |i| {
-        const src = path.items[i];
-        const dst = path.items[i + 1];
-        for (fst.arcs(src)) |a| {
-            if (a.nextstate == dst) {
-                try result.addArc(@intCast(i), A.init(a.ilabel, a.olabel, a.weight, @intCast(i + 1)));
-                break;
-            }
-        }
+    var out_idx: usize = 0;
+    var i = reverse_edges.items.len;
+    while (i > 0) {
+        i -= 1;
+        const bp = reverse_edges.items[i];
+        const arc = fst.arcs(bp.prev_state)[bp.arc_idx];
+        try result.addArc(@intCast(out_idx), A.init(arc.ilabel, arc.olabel, arc.weight, @intCast(out_idx + 1)));
+        out_idx += 1;
     }
 
     return result;
@@ -186,6 +186,33 @@ test "shortest-path: empty FST" {
     defer result.deinit();
 
     try std.testing.expectEqual(no_state, result.start());
+}
+
+test "shortest-path: preserves selected arc when multiple arcs share nextstate" {
+    const W = @import("../weight.zig").TropicalWeight;
+    const A = arc_mod.Arc(W);
+    const allocator = std.testing.allocator;
+
+    var fst = mutable_fst_mod.MutableFst(W).init(allocator);
+    defer fst.deinit();
+    _ = try fst.addState(); // 0
+    _ = try fst.addState(); // 1
+    fst.setStart(0);
+    fst.setFinal(1, W.one);
+
+    // Both arcs go to state 1; shortest path must choose the cheaper one.
+    try fst.addArc(0, A.init(10, 100, W.init(3.0), 1));
+    try fst.addArc(0, A.init(11, 101, W.init(1.0), 1));
+
+    var result = try shortestPath(W, allocator, &fst, 1);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.numStates());
+    const arcs = result.arcs(0);
+    try std.testing.expectEqual(@as(usize, 1), arcs.len);
+    try std.testing.expectEqual(@as(u32, 11), arcs[0].ilabel);
+    try std.testing.expectEqual(@as(u32, 101), arcs[0].olabel);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), arcs[0].weight.value, 0.001);
 }
 
 test "shortest-path: n > 1 not supported" {

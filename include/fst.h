@@ -100,6 +100,7 @@ FstError fst_save(FstHandle handle, const char* path);
 
 /* --- Operations (MutableFst -> MutableFst) --- */
 FstMutableHandle fst_compose(FstMutableHandle a, FstMutableHandle b);
+/* Uses lock-free pinned access to frozen RHS (no per-call frozen clone). */
 FstMutableHandle fst_compose_frozen(FstMutableHandle a, FstHandle b);
 /* Acceptors only. For transducers, use fst_optimize (encode/decode path). */
 FstMutableHandle fst_determinize(FstMutableHandle handle);

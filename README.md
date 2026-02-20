@@ -70,6 +70,9 @@ Handle table bookkeeping is mutex-protected, but heavy algorithms run on
 snapshots outside the lock. This removes full-call serialization for
 compute-heavy C API operations.
 
+`fst_compose_frozen` pins immutable handles for lock-free composition
+instead of cloning frozen bytes on every call.
+
 In-place mutating C APIs (`union`/`concat`/`closure`/`minimize`) use optimistic
 commit and return `invalid_arg` if the same handle changed concurrently.
 
@@ -88,6 +91,26 @@ zig build bench        # run profile-friendly benchmark (scenarios + JSON output
 ```
 
 Example benchmark run:
+
+```bash
+zig build bench -Doptimize=ReleaseFast -- \
+  --scenario compose_frozen_shortest_path \
+  --len 50 --transducer-len 2048 --branches 6 \
+  --iters 200 --warmup 20 \
+  --format json
+```
+
+Issue #1 matrix benchmark:
+
+```bash
+python3 bench/run_issue1_bench.py \
+  --lengths 5,10,20,30,40,50 \
+  --transducer-len 2048 \
+  --branches 6 \
+  --iters 100 --warmup 20
+```
+
+Legacy example:
 
 ```bash
 zig build bench -Doptimize=ReleaseFast -- \

@@ -1,6 +1,7 @@
 const std = @import("std");
 const arc_mod = @import("../arc.zig");
 const mutable_fst_mod = @import("../mutable-fst.zig");
+const fst_mod = @import("../fst.zig");
 
 const Label = arc_mod.Label;
 const StateId = arc_mod.StateId;
@@ -27,6 +28,7 @@ fn toWeight(comptime W: type, value: anytype) W {
 ///   filter=2: only fst1 can consume eps
 pub fn compose(comptime W: type, allocator: Allocator, fst1: anytype, fst2: anytype) !mutable_fst_mod.MutableFst(W) {
     const A = arc_mod.Arc(W);
+    const rhs_has_label_lookup = comptime @hasDecl(@TypeOf(fst2.*), "arcsByIlabel");
 
     if (fst1.start() == no_state or fst2.start() == no_state) {
         return mutable_fst_mod.MutableFst(W).init(allocator);
@@ -88,11 +90,24 @@ pub fn compose(comptime W: type, allocator: Allocator, fst1: anytype, fst2: anyt
             }
         }.call;
 
-        // Match non-epsilon arcs: olabel of fst1 == ilabel of fst2
+        // Match non-epsilon arcs: olabel of fst1 == ilabel of fst2.
+        // Frozen RHS supports logarithmic label lookup; mutable fallback scans.
         for (fst1.arcs(t.s1)) |a1| {
             if (a1.olabel == epsilon) continue;
-            for (fst2.arcs(t.s2)) |a2| {
-                if (a2.ilabel == a1.olabel) {
+            if (comptime rhs_has_label_lookup) {
+                for (fst2.arcsByIlabel(t.s2, a1.olabel)) |a2| {
+                    const next = StateTuple{ .s1 = a1.nextstate, .s2 = a2.nextstate, .filter = 0 };
+                    const ns = try getOrCreate(&result, &state_map, &queue, arena, next);
+                    try result.addArc(current, A.init(
+                        a1.ilabel,
+                        a2.olabel,
+                        W.times(toWeight(W, a1.weight), toWeight(W, a2.weight)),
+                        ns,
+                    ));
+                }
+            } else {
+                for (fst2.arcs(t.s2)) |a2| {
+                    if (a2.ilabel != a1.olabel) continue;
                     const next = StateTuple{ .s1 = a1.nextstate, .s2 = a2.nextstate, .filter = 0 };
                     const ns = try getOrCreate(&result, &state_map, &queue, arena, next);
                     try result.addArc(current, A.init(
@@ -150,6 +165,27 @@ pub fn compose(comptime W: type, allocator: Allocator, fst1: anytype, fst2: anyt
     }
 
     return result;
+}
+
+fn expectFstEq(comptime W: type, lhs: *mutable_fst_mod.MutableFst(W), rhs: *mutable_fst_mod.MutableFst(W)) !void {
+    lhs.sortAllArcs();
+    rhs.sortAllArcs();
+
+    try std.testing.expectEqual(lhs.start(), rhs.start());
+    try std.testing.expectEqual(lhs.numStates(), rhs.numStates());
+    for (0..lhs.numStates()) |i| {
+        const s: StateId = @intCast(i);
+        try std.testing.expectEqual(lhs.numArcs(s), rhs.numArcs(s));
+        try std.testing.expect(lhs.finalWeight(s).eql(rhs.finalWeight(s)));
+        const a_arcs = lhs.arcs(s);
+        const b_arcs = rhs.arcs(s);
+        for (a_arcs, b_arcs) |aa, bb| {
+            try std.testing.expectEqual(aa.ilabel, bb.ilabel);
+            try std.testing.expectEqual(aa.olabel, bb.olabel);
+            try std.testing.expect(aa.weight.eql(bb.weight));
+            try std.testing.expectEqual(aa.nextstate, bb.nextstate);
+        }
+    }
 }
 
 // ── Tests ──
@@ -240,4 +276,49 @@ test "compose: empty intersection" {
         }
         try std.testing.expect(!has_final);
     }
+}
+
+test "compose: frozen rhs label-lookup path matches mutable rhs result" {
+    const W = @import("../weight.zig").TropicalWeight;
+    const A = arc_mod.Arc(W);
+    const MutableFst = mutable_fst_mod.MutableFst(W);
+    const allocator = std.testing.allocator;
+
+    // lhs emits labels 10 and 20 on output tape.
+    var lhs = MutableFst.init(allocator);
+    defer lhs.deinit();
+    _ = try lhs.addState(); // 0
+    _ = try lhs.addState(); // 1
+    _ = try lhs.addState(); // 2
+    lhs.setStart(0);
+    lhs.setFinal(2, W.one);
+    try lhs.addArc(0, A.init(1, 10, W.one, 1));
+    try lhs.addArc(1, A.init(2, 20, W.one, 2));
+
+    // rhs has many competing ilabels from the same state.
+    var rhs_mut = MutableFst.init(allocator);
+    defer rhs_mut.deinit();
+    _ = try rhs_mut.addState(); // 0
+    _ = try rhs_mut.addState(); // 1
+    _ = try rhs_mut.addState(); // 2
+    rhs_mut.setStart(0);
+    rhs_mut.setFinal(2, W.one);
+    try rhs_mut.addArc(0, A.init(5, 50, W.one, 1));
+    try rhs_mut.addArc(0, A.init(10, 100, W.one, 1));
+    try rhs_mut.addArc(0, A.init(10, 101, W.init(2.0), 1));
+    try rhs_mut.addArc(0, A.init(15, 150, W.one, 1));
+    try rhs_mut.addArc(1, A.init(20, 200, W.one, 2));
+    try rhs_mut.addArc(1, A.init(21, 201, W.one, 2));
+
+    var rhs_for_freeze = try rhs_mut.clone(allocator);
+    defer rhs_for_freeze.deinit();
+    var rhs_frozen = try fst_mod.Fst(W).fromMutable(allocator, &rhs_for_freeze);
+    defer rhs_frozen.deinit();
+
+    var out_mut = try compose(W, allocator, &lhs, &rhs_mut);
+    defer out_mut.deinit();
+    var out_frozen = try compose(W, allocator, &lhs, &rhs_frozen);
+    defer out_frozen.deinit();
+
+    try expectFstEq(W, &out_mut, &out_frozen);
 }

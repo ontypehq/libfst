@@ -62,20 +62,20 @@ pub fn Fst(comptime W: type) type {
         };
 
         fn header(self: *const Self) *const Header {
-            return @alignCast(@ptrCast(self.bytes.ptr));
+            return @ptrCast(@alignCast(self.bytes.ptr));
         }
 
         fn stateTable(self: *const Self) []const StateEntry {
             const h = self.header();
             const offset = @sizeOf(Header);
-            const ptr: [*]const StateEntry = @alignCast(@ptrCast(self.bytes.ptr + offset));
+            const ptr: [*]const StateEntry = @ptrCast(@alignCast(self.bytes.ptr + offset));
             return ptr[0..h.num_states];
         }
 
         fn arcTable(self: *const Self) []const PackedArc {
             const h = self.header();
             const offset = @sizeOf(Header) + @as(usize, h.num_states) * @sizeOf(StateEntry);
-            const ptr: [*]const PackedArc = @alignCast(@ptrCast(self.bytes.ptr + offset));
+            const ptr: [*]const PackedArc = @ptrCast(@alignCast(self.bytes.ptr + offset));
             return ptr[0..h.num_arcs];
         }
 
@@ -104,6 +104,35 @@ pub fn Fst(comptime W: type) type {
         pub fn arcs(self: *const Self, s: StateId) []const PackedArc {
             const entry = self.stateTable()[s];
             return self.arcTable()[entry.arc_offset..][0..entry.num_arcs];
+        }
+
+        /// Return all arcs from state `s` whose input label equals `ilabel`.
+        /// Arcs are sorted by ilabel in frozen layout, so this uses
+        /// lower/upper-bound binary search.
+        pub fn arcsByIlabel(self: *const Self, s: StateId, ilabel: Label) []const PackedArc {
+            const state_arcs = self.arcs(s);
+            var lo: usize = 0;
+            var hi: usize = state_arcs.len;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                if (state_arcs[mid].ilabel < ilabel) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            const start_idx = lo;
+
+            hi = state_arcs.len;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                if (state_arcs[mid].ilabel <= ilabel) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            return state_arcs[start_idx..lo];
         }
 
         /// Binary search for an arc with the given ilabel from state s.
@@ -146,7 +175,7 @@ pub fn Fst(comptime W: type) type {
             errdefer allocator.free(bytes);
 
             // Write header
-            const hdr: *Header = @alignCast(@ptrCast(bytes.ptr));
+            const hdr: *Header = @ptrCast(@alignCast(bytes.ptr));
             hdr.* = .{
                 .magic = MAGIC,
                 .version = VERSION,
@@ -158,7 +187,7 @@ pub fn Fst(comptime W: type) type {
             };
 
             // Write state table
-            const state_ptr: [*]StateEntry = @alignCast(@ptrCast(bytes.ptr + @sizeOf(Header)));
+            const state_ptr: [*]StateEntry = @ptrCast(@alignCast(bytes.ptr + @sizeOf(Header)));
             var arc_offset: u32 = 0;
             for (0..num_states) |i| {
                 const s: StateId = @intCast(i);
@@ -173,7 +202,7 @@ pub fn Fst(comptime W: type) type {
 
             // Write arc table
             const arc_base = @sizeOf(Header) + @as(usize, num_states) * @sizeOf(StateEntry);
-            const arc_ptr: [*]PackedArc = @alignCast(@ptrCast(bytes.ptr + arc_base));
+            const arc_ptr: [*]PackedArc = @ptrCast(@alignCast(bytes.ptr + arc_base));
             var ai: usize = 0;
             for (0..num_states) |i| {
                 for (mutable.arcs(@intCast(i))) |a| {
@@ -197,7 +226,7 @@ pub fn Fst(comptime W: type) type {
         /// Load from pre-existing bytes (zero-copy, e.g. from mmap).
         pub fn fromBytes(bytes: []align(8) const u8) !Self {
             if (bytes.len < @sizeOf(Header)) return error.InvalidFormat;
-            const hdr: *const Header = @alignCast(@ptrCast(bytes.ptr));
+            const hdr: *const Header = @ptrCast(@alignCast(bytes.ptr));
             if (hdr.magic != MAGIC) return error.InvalidMagic;
             if (hdr.version != VERSION) return error.UnsupportedVersion;
             if (hdr.weight_type != weightTypeId(W)) return error.WeightTypeMismatch;
@@ -294,6 +323,35 @@ test "fst: findArc binary search" {
     // Find non-existing arc
     const not_found = frozen.findArc(0, 7);
     try std.testing.expect(not_found == null);
+}
+
+test "fst: arcsByIlabel range lookup" {
+    const W = weight_mod.TropicalWeight;
+    const A = arc_mod.Arc(W);
+    const allocator = std.testing.allocator;
+
+    var mfst = mutable_fst_mod.MutableFst(W).init(allocator);
+    defer mfst.deinit();
+
+    _ = try mfst.addState();
+    _ = try mfst.addState();
+    mfst.setStart(0);
+    mfst.setFinal(1, W.one);
+    try mfst.addArc(0, A.init(5, 50, W.one, 1));
+    try mfst.addArc(0, A.init(10, 100, W.one, 1));
+    try mfst.addArc(0, A.init(10, 101, W.one, 1));
+    try mfst.addArc(0, A.init(15, 150, W.one, 1));
+
+    var frozen = try Fst(W).fromMutable(allocator, &mfst);
+    defer frozen.deinit();
+
+    const arcs_10 = frozen.arcsByIlabel(0, 10);
+    try std.testing.expectEqual(@as(usize, 2), arcs_10.len);
+    try std.testing.expectEqual(@as(Label, 10), arcs_10[0].ilabel);
+    try std.testing.expectEqual(@as(Label, 10), arcs_10[1].ilabel);
+
+    const arcs_missing = frozen.arcsByIlabel(0, 11);
+    try std.testing.expectEqual(@as(usize, 0), arcs_missing.len);
 }
 
 test "fst: fromBytes roundtrip" {
