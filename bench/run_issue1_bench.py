@@ -16,7 +16,14 @@ from pathlib import Path
 
 SCENARIOS = (
     "compose_frozen_transducer",
+    "compose_frozen_epsilon_dense",
+    "compose_frozen_ambiguous_chain",
+    "compose_frozen_shortest_path_ambiguous",
+    "compose_frozen_lazy_shortest_path_ambiguous",
+    "compose_frozen_shortest_path_epsilon_dense",
+    "compose_frozen_lazy_shortest_path_epsilon_dense",
     "compose_frozen_shortest_path",
+    "compose_frozen_lazy_shortest_path",
 )
 
 
@@ -89,4 +96,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

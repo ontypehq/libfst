@@ -15,7 +15,14 @@ const Scenario = enum {
     optimize_transducer,
     compose_acceptor,
     compose_frozen_transducer,
+    compose_frozen_epsilon_dense,
+    compose_frozen_ambiguous_chain,
     compose_frozen_shortest_path,
+    compose_frozen_shortest_path_ambiguous,
+    compose_frozen_shortest_path_epsilon_dense,
+    compose_frozen_lazy_shortest_path,
+    compose_frozen_lazy_shortest_path_ambiguous,
+    compose_frozen_lazy_shortest_path_epsilon_dense,
     rm_epsilon_acceptor,
     shortest_path_acceptor,
 };
@@ -39,14 +46,20 @@ const Options = struct {
 const Inputs = struct {
     acceptor: MutableFst,
     acceptor_branch: MutableFst,
+    acceptor_repeat: MutableFst,
     transducer: MutableFst,
     transducer_frozen: FrozenFst,
+    transducer_eps_frozen: FrozenFst,
+    transducer_ambig_frozen: FrozenFst,
 
     fn deinit(self: *Inputs) void {
         self.acceptor.deinit();
         self.acceptor_branch.deinit();
+        self.acceptor_repeat.deinit();
         self.transducer.deinit();
         self.transducer_frozen.deinit();
+        self.transducer_eps_frozen.deinit();
+        self.transducer_ambig_frozen.deinit();
     }
 };
 
@@ -63,7 +76,14 @@ fn parseScenario(arg: []const u8) ?Scenario {
     if (std.mem.eql(u8, arg, "optimize_transducer")) return .optimize_transducer;
     if (std.mem.eql(u8, arg, "compose_acceptor")) return .compose_acceptor;
     if (std.mem.eql(u8, arg, "compose_frozen_transducer")) return .compose_frozen_transducer;
+    if (std.mem.eql(u8, arg, "compose_frozen_epsilon_dense")) return .compose_frozen_epsilon_dense;
+    if (std.mem.eql(u8, arg, "compose_frozen_ambiguous_chain")) return .compose_frozen_ambiguous_chain;
     if (std.mem.eql(u8, arg, "compose_frozen_shortest_path")) return .compose_frozen_shortest_path;
+    if (std.mem.eql(u8, arg, "compose_frozen_shortest_path_ambiguous")) return .compose_frozen_shortest_path_ambiguous;
+    if (std.mem.eql(u8, arg, "compose_frozen_shortest_path_epsilon_dense")) return .compose_frozen_shortest_path_epsilon_dense;
+    if (std.mem.eql(u8, arg, "compose_frozen_lazy_shortest_path")) return .compose_frozen_lazy_shortest_path;
+    if (std.mem.eql(u8, arg, "compose_frozen_lazy_shortest_path_ambiguous")) return .compose_frozen_lazy_shortest_path_ambiguous;
+    if (std.mem.eql(u8, arg, "compose_frozen_lazy_shortest_path_epsilon_dense")) return .compose_frozen_lazy_shortest_path_epsilon_dense;
     if (std.mem.eql(u8, arg, "rm_epsilon_acceptor")) return .rm_epsilon_acceptor;
     if (std.mem.eql(u8, arg, "shortest_path_acceptor")) return .shortest_path_acceptor;
     return null;
@@ -84,7 +104,7 @@ fn parseBool(arg: []const u8) ?bool {
 fn printUsage(out: *std.Io.Writer) !void {
     try out.writeAll(
         \\Usage: optimize-bench [options]
-        \\  --scenario <name>         clone_acceptor|optimize_acceptor|optimize_transducer|compose_acceptor|compose_frozen_transducer|compose_frozen_shortest_path|rm_epsilon_acceptor|shortest_path_acceptor
+        \\  --scenario <name>         clone_acceptor|optimize_acceptor|optimize_transducer|compose_acceptor|compose_frozen_transducer|compose_frozen_epsilon_dense|compose_frozen_ambiguous_chain|compose_frozen_shortest_path|compose_frozen_shortest_path_ambiguous|compose_frozen_shortest_path_epsilon_dense|compose_frozen_lazy_shortest_path|compose_frozen_lazy_shortest_path_ambiguous|compose_frozen_lazy_shortest_path_epsilon_dense|rm_epsilon_acceptor|shortest_path_acceptor
         \\  --len <n>                 graph length (default: 4096)
         \\  --transducer-len <n>      transducer length (default: len/4, min 1)
         \\  --branches <n>            branching factor for transducer (default: 3)
@@ -162,6 +182,22 @@ fn buildLinearAcceptorWithAlphabet(allocator: Allocator, len: usize, alphabet: u
     return fst;
 }
 
+fn buildRepeatedLabelAcceptor(allocator: Allocator, len: usize, label: Label) !MutableFst {
+    var fst = MutableFst.init(allocator);
+    errdefer fst.deinit();
+
+    try fst.addStates(len + 1);
+    fst.setStart(0);
+    fst.setFinal(@intCast(len), W.one);
+
+    for (0..len) |i| {
+        const src: StateId = @intCast(i);
+        const dst: StateId = @intCast(i + 1);
+        try fst.addArc(src, A.init(label, label, W.one, dst));
+    }
+    return fst;
+}
+
 fn buildBranchingTransducer(allocator: Allocator, len: usize, branches: usize) !MutableFst {
     var fst = MutableFst.init(allocator);
     errdefer fst.deinit();
@@ -183,11 +219,73 @@ fn buildBranchingTransducer(allocator: Allocator, len: usize, branches: usize) !
     return fst;
 }
 
+fn buildEpsilonDenseTransducer(allocator: Allocator, len: usize, branches: usize) !MutableFst {
+    var fst = MutableFst.init(allocator);
+    errdefer fst.deinit();
+
+    // +1 so state `len` can be final sink.
+    try fst.addStates(len + 1);
+    fst.setStart(0);
+    for (0..(len + 1)) |i| {
+        fst.setFinal(@intCast(i), W.one);
+    }
+
+    for (0..len) |i| {
+        const src: StateId = @intCast(i);
+
+        // Epsilon chain creates a large epsilon-closure frontier.
+        try fst.addArc(src, A.init(0, 0, W.one, @intCast(i + 1)));
+
+        // Repeated ilabel=1 transitions with short forward skips create
+        // ambiguous alignments against long repeated-token inputs.
+        for (0..branches) |b| {
+            const jump = (b % 4) + 1;
+            const next_idx = @min(i + jump, len);
+            const dst: StateId = @intCast(next_idx);
+            const olabel: Label = @intCast(((i + b) % 255) + 1);
+            const weight = W.init(@floatFromInt(b));
+            try fst.addArc(src, A.init(1, olabel, weight, dst));
+        }
+    }
+    return fst;
+}
+
+fn buildAmbiguousChainTransducer(allocator: Allocator, len: usize, branches: usize) !MutableFst {
+    var fst = MutableFst.init(allocator);
+    errdefer fst.deinit();
+
+    try fst.addStates(len + 1);
+    fst.setStart(0);
+    for (0..(len + 1)) |i| {
+        fst.setFinal(@intCast(i), W.one);
+    }
+
+    for (0..(len + 1)) |i| {
+        const src: StateId = @intCast(i);
+        // Stay transition: allows repeated reuse of the same rhs state.
+        try fst.addArc(src, A.init(1, 1, W.one, src));
+
+        // Advance transitions: multiple short skips create a widening frontier
+        // as input length grows, which exposes n^2-style tuple growth.
+        const fanout = @max(@as(usize, 1), @min(branches, 4));
+        for (0..fanout) |b| {
+            const jump = b + 1;
+            const next_idx = @min(i + jump, len);
+            const dst: StateId = @intCast(next_idx);
+            const olabel: Label = @intCast(((i + b) % 255) + 1);
+            try fst.addArc(src, A.init(1, olabel, W.init(@floatFromInt(b)), dst));
+        }
+    }
+    return fst;
+}
+
 fn initInputs(allocator: Allocator, len: usize, transducer_len: usize, branches: usize) !Inputs {
     var acceptor = try buildLinearAcceptor(allocator, len);
     errdefer acceptor.deinit();
     var acceptor_branch = try buildLinearAcceptorWithAlphabet(allocator, len, branches);
     errdefer acceptor_branch.deinit();
+    var acceptor_repeat = try buildRepeatedLabelAcceptor(allocator, len, 1);
+    errdefer acceptor_repeat.deinit();
 
     var transducer = try buildBranchingTransducer(allocator, transducer_len, branches);
     errdefer transducer.deinit();
@@ -211,11 +309,24 @@ fn initInputs(allocator: Allocator, len: usize, transducer_len: usize, branches:
     var transducer_frozen = try FrozenFst.fromMutable(allocator, &transducer_for_freeze);
     errdefer transducer_frozen.deinit();
 
+    var eps_dense = try buildEpsilonDenseTransducer(allocator, transducer_len, branches);
+    defer eps_dense.deinit();
+    var transducer_eps_frozen = try FrozenFst.fromMutable(allocator, &eps_dense);
+    errdefer transducer_eps_frozen.deinit();
+
+    var ambig = try buildAmbiguousChainTransducer(allocator, transducer_len, branches);
+    defer ambig.deinit();
+    var transducer_ambig_frozen = try FrozenFst.fromMutable(allocator, &ambig);
+    errdefer transducer_ambig_frozen.deinit();
+
     return .{
         .acceptor = acceptor,
         .acceptor_branch = acceptor_branch,
+        .acceptor_repeat = acceptor_repeat,
         .transducer = transducer,
         .transducer_frozen = transducer_frozen,
+        .transducer_eps_frozen = transducer_eps_frozen,
+        .transducer_ambig_frozen = transducer_ambig_frozen,
     };
 }
 
@@ -246,10 +357,49 @@ fn runScenarioOnce(scenario: Scenario, allocator: Allocator, inputs: *const Inpu
             defer out.deinit();
             return out.numStates();
         },
+        .compose_frozen_epsilon_dense => {
+            var out = try libfst.ops.compose.compose(W, allocator, &inputs.acceptor_repeat, &inputs.transducer_eps_frozen);
+            defer out.deinit();
+            return out.numStates();
+        },
+        .compose_frozen_ambiguous_chain => {
+            var out = try libfst.ops.compose.compose(W, allocator, &inputs.acceptor_repeat, &inputs.transducer_ambig_frozen);
+            defer out.deinit();
+            return out.numStates();
+        },
         .compose_frozen_shortest_path => {
             var lattice = try libfst.ops.compose.compose(W, allocator, &inputs.acceptor_branch, &inputs.transducer_frozen);
             defer lattice.deinit();
             var best = try libfst.ops.shortest_path.shortestPath(W, allocator, &lattice, 1);
+            defer best.deinit();
+            return best.numStates();
+        },
+        .compose_frozen_shortest_path_ambiguous => {
+            var lattice = try libfst.ops.compose.compose(W, allocator, &inputs.acceptor_repeat, &inputs.transducer_ambig_frozen);
+            defer lattice.deinit();
+            var best = try libfst.ops.shortest_path.shortestPath(W, allocator, &lattice, 1);
+            defer best.deinit();
+            return best.numStates();
+        },
+        .compose_frozen_shortest_path_epsilon_dense => {
+            var lattice = try libfst.ops.compose.compose(W, allocator, &inputs.acceptor_repeat, &inputs.transducer_eps_frozen);
+            defer lattice.deinit();
+            var best = try libfst.ops.shortest_path.shortestPath(W, allocator, &lattice, 1);
+            defer best.deinit();
+            return best.numStates();
+        },
+        .compose_frozen_lazy_shortest_path => {
+            var best = try libfst.ops.compose_shortest_path.composeShortestPath(W, allocator, &inputs.acceptor_branch, &inputs.transducer_frozen, 1);
+            defer best.deinit();
+            return best.numStates();
+        },
+        .compose_frozen_lazy_shortest_path_ambiguous => {
+            var best = try libfst.ops.compose_shortest_path.composeShortestPath(W, allocator, &inputs.acceptor_repeat, &inputs.transducer_ambig_frozen, 1);
+            defer best.deinit();
+            return best.numStates();
+        },
+        .compose_frozen_lazy_shortest_path_epsilon_dense => {
+            var best = try libfst.ops.compose_shortest_path.composeShortestPath(W, allocator, &inputs.acceptor_repeat, &inputs.transducer_eps_frozen, 1);
             defer best.deinit();
             return best.numStates();
         },
@@ -311,7 +461,14 @@ fn scenarioName(scenario: Scenario) []const u8 {
         .optimize_transducer => "optimize_transducer",
         .compose_acceptor => "compose_acceptor",
         .compose_frozen_transducer => "compose_frozen_transducer",
+        .compose_frozen_epsilon_dense => "compose_frozen_epsilon_dense",
+        .compose_frozen_ambiguous_chain => "compose_frozen_ambiguous_chain",
         .compose_frozen_shortest_path => "compose_frozen_shortest_path",
+        .compose_frozen_shortest_path_ambiguous => "compose_frozen_shortest_path_ambiguous",
+        .compose_frozen_shortest_path_epsilon_dense => "compose_frozen_shortest_path_epsilon_dense",
+        .compose_frozen_lazy_shortest_path => "compose_frozen_lazy_shortest_path",
+        .compose_frozen_lazy_shortest_path_ambiguous => "compose_frozen_lazy_shortest_path_ambiguous",
+        .compose_frozen_lazy_shortest_path_epsilon_dense => "compose_frozen_lazy_shortest_path_epsilon_dense",
         .rm_epsilon_acceptor => "rm_epsilon_acceptor",
         .shortest_path_acceptor => "shortest_path_acceptor",
     };

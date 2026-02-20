@@ -20,6 +20,7 @@ pub const ops = struct {
     pub const determinize = @import("ops/determinize.zig");
     pub const minimize = @import("ops/minimize.zig");
     pub const compose = @import("ops/compose.zig");
+    pub const compose_shortest_path = @import("ops/compose-shortest-path.zig");
     pub const shortest_path = @import("ops/shortest-path.zig");
     pub const optimize = @import("ops/optimize.zig");
     pub const difference = @import("ops/difference.zig");
@@ -64,6 +65,7 @@ test {
     _ = ops.determinize;
     _ = ops.minimize;
     _ = ops.compose;
+    _ = ops.compose_shortest_path;
     _ = ops.shortest_path;
     _ = ops.optimize;
     _ = ops.difference;

@@ -49,6 +49,7 @@ fst_mutable_free(h);
 | Operation | Description |
 |-----------|-------------|
 | `compose` | Combine two FSTs (key operation for text normalization) |
+| `compose_shortest_path` | Lazy shortest path on implicit compose graph (`n=1`) |
 | `determinize` | Convert acceptor NFA to DFA (acceptor-only) |
 | `minimize` | Merge equivalent states (Hopcroft partition refinement) |
 | `rm_epsilon` | Remove epsilon transitions |
@@ -72,6 +73,8 @@ compute-heavy C API operations.
 
 `fst_compose_frozen` pins immutable handles for lock-free composition
 instead of cloning frozen bytes on every call.
+`fst_compose_frozen_shortest_path` additionally avoids materializing the
+full compose lattice for best-path extraction.
 
 In-place mutating C APIs (`union`/`concat`/`closure`/`minimize`) use optimistic
 commit and return `invalid_arg` if the same handle changed concurrently.
@@ -94,9 +97,9 @@ Example benchmark run:
 
 ```bash
 zig build bench -Doptimize=ReleaseFast -- \
-  --scenario compose_frozen_shortest_path \
-  --len 50 --transducer-len 2048 --branches 6 \
-  --iters 200 --warmup 20 \
+  --scenario compose_frozen_epsilon_dense \
+  --len 96 --transducer-len 4096 --branches 12 \
+  --iters 200 --warmup 30 \
   --format json
 ```
 
@@ -109,6 +112,24 @@ python3 bench/run_issue1_bench.py \
   --branches 6 \
   --iters 100 --warmup 20
 ```
+
+Issue #1 profile-friendly stress benchmark:
+
+```bash
+python3 bench/run_issue1_profile_bench.py \
+  --lengths 11,19,33,64,96,128,160,192,224,251 \
+  --transducer-len 4096 \
+  --branches 12 \
+  --iters 120 --warmup 20
+```
+
+Default stress matrix includes:
+- `compose_frozen_epsilon_dense` (epsilon-heavy topology)
+- `compose_frozen_ambiguous_chain` (nondeterministic repeated-label topology)
+- `compose_frozen_shortest_path_ambiguous` (eager compose + shortest_path)
+- `compose_frozen_lazy_shortest_path_ambiguous` (lazy compose_shortest_path)
+- `compose_frozen_shortest_path_epsilon_dense` (eager compose + shortest_path)
+- `compose_frozen_lazy_shortest_path_epsilon_dense` (lazy compose_shortest_path)
 
 Legacy example:
 

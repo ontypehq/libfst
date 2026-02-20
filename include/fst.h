@@ -102,6 +102,8 @@ FstError fst_save(FstHandle handle, const char* path);
 FstMutableHandle fst_compose(FstMutableHandle a, FstMutableHandle b);
 /* Uses lock-free pinned access to frozen RHS (no per-call frozen clone). */
 FstMutableHandle fst_compose_frozen(FstMutableHandle a, FstHandle b);
+/* Lazy path: shortest_path(compose(a, b), n) without materializing full lattice. */
+FstMutableHandle fst_compose_frozen_shortest_path(FstMutableHandle a, FstHandle b, uint32_t n);
 /* Acceptors only. For transducers, use fst_optimize (encode/decode path). */
 FstMutableHandle fst_determinize(FstMutableHandle handle);
 FstError fst_minimize(FstMutableHandle handle);

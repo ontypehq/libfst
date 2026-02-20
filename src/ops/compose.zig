@@ -134,31 +134,61 @@ pub fn compose(comptime W: type, allocator: Allocator, fst1: anytype, fst2: anyt
         }
 
         if (t.filter != 2) {
-            // fst2 can consume input epsilon
-            for (fst2.arcs(t.s2)) |a2| {
-                if (a2.ilabel == epsilon) {
+            // fst2 can consume input epsilon.
+            // For frozen RHS, use label-indexed epsilon lookup instead of
+            // scanning all outgoing arcs.
+            if (comptime rhs_has_label_lookup) {
+                for (fst2.arcsByIlabel(t.s2, epsilon)) |a2| {
                     const new_filter: u8 = if (t.filter == 0) 1 else t.filter;
                     const next = StateTuple{ .s1 = t.s1, .s2 = a2.nextstate, .filter = new_filter };
                     const ns = try getOrCreate(&result, &state_map, &queue, arena, next);
                     try result.addArc(current, A.init(epsilon, a2.olabel, toWeight(W, a2.weight), ns));
+                }
+            } else {
+                for (fst2.arcs(t.s2)) |a2| {
+                    if (a2.ilabel == epsilon) {
+                        const new_filter: u8 = if (t.filter == 0) 1 else t.filter;
+                        const next = StateTuple{ .s1 = t.s1, .s2 = a2.nextstate, .filter = new_filter };
+                        const ns = try getOrCreate(&result, &state_map, &queue, arena, next);
+                        try result.addArc(current, A.init(epsilon, a2.olabel, toWeight(W, a2.weight), ns));
+                    }
                 }
             }
         }
 
         // Both consume epsilon simultaneously (filter reset)
         if (t.filter == 0) {
-            for (fst1.arcs(t.s1)) |a1| {
-                if (a1.olabel != epsilon) continue;
-                for (fst2.arcs(t.s2)) |a2| {
-                    if (a2.ilabel != epsilon) continue;
-                    const next = StateTuple{ .s1 = a1.nextstate, .s2 = a2.nextstate, .filter = 0 };
-                    const ns = try getOrCreate(&result, &state_map, &queue, arena, next);
-                    try result.addArc(current, A.init(
-                        a1.ilabel,
-                        a2.olabel,
-                        W.times(toWeight(W, a1.weight), toWeight(W, a2.weight)),
-                        ns,
-                    ));
+            if (comptime rhs_has_label_lookup) {
+                const rhs_eps = fst2.arcsByIlabel(t.s2, epsilon);
+                if (rhs_eps.len > 0) {
+                    for (fst1.arcs(t.s1)) |a1| {
+                        if (a1.olabel != epsilon) continue;
+                        for (rhs_eps) |a2| {
+                            const next = StateTuple{ .s1 = a1.nextstate, .s2 = a2.nextstate, .filter = 0 };
+                            const ns = try getOrCreate(&result, &state_map, &queue, arena, next);
+                            try result.addArc(current, A.init(
+                                a1.ilabel,
+                                a2.olabel,
+                                W.times(toWeight(W, a1.weight), toWeight(W, a2.weight)),
+                                ns,
+                            ));
+                        }
+                    }
+                }
+            } else {
+                for (fst1.arcs(t.s1)) |a1| {
+                    if (a1.olabel != epsilon) continue;
+                    for (fst2.arcs(t.s2)) |a2| {
+                        if (a2.ilabel != epsilon) continue;
+                        const next = StateTuple{ .s1 = a1.nextstate, .s2 = a2.nextstate, .filter = 0 };
+                        const ns = try getOrCreate(&result, &state_map, &queue, arena, next);
+                        try result.addArc(current, A.init(
+                            a1.ilabel,
+                            a2.olabel,
+                            W.times(toWeight(W, a1.weight), toWeight(W, a2.weight)),
+                            ns,
+                        ));
+                    }
                 }
             }
         }
