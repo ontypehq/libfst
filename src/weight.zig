@@ -55,7 +55,7 @@ pub const TropicalWeight = struct {
         try writer.writeInt(u64, bits, .little);
     }
 
-    pub fn format(self: TropicalWeight, w: anytype) !void {
+    pub fn format(self: TropicalWeight, w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (self.isZero()) {
             try w.writeAll("inf");
         } else {
@@ -122,7 +122,7 @@ pub const LogWeight = struct {
         try writer.writeInt(u64, bits, .little);
     }
 
-    pub fn format(self: LogWeight, w: anytype) !void {
+    pub fn format(self: LogWeight, w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (self.isZero()) {
             try w.writeAll("inf");
         } else {

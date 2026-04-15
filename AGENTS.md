@@ -1,126 +1,108 @@
 # libfst
 
-A Finite State Transducer library in Zig, inspired by [OpenFST](https://www.openfst.org/) and [WeTextProcessing](https://github.com/wenet-e2e/WeTextProcessing).
+Finite State Transducer library in Zig, inspired by
+[OpenFST](https://www.openfst.org/) and
+[WeTextProcessing](https://github.com/wenet-e2e/WeTextProcessing).
 
-## Quick Reference
+## Skills First
 
-### Zig Docs Lookup
-
-Use `zigdoc` CLI to query Zig 0.15 standard library docs instantly:
-
-```bash
-zigdoc std.ArrayList            # type functions
-zigdoc std.mem.Allocator        # structs & methods
-zigdoc std.hash_map             # namespaces
-zigdoc std.Build.addLibrary     # build system API
-zigdoc --dump-imports           # list modules from build.zig
-```
-
-This is faster than web search for Zig API questions. Works with any `@import`-ed module in `build.zig`.
+- This repository is configured with `$zig` and `$zigdoc`.
+- For Zig syntax, standard-library APIs, build-system details, migration
+  questions, or code-review checks, load the relevant skill instead of copying
+  guidance into this file.
+- Use `zigdoc` for exact signatures before changing Zig std APIs. Zig changes
+  too fast for memory-based edits to be acceptable.
+- Keep this file limited to libfst-specific architecture, commands, and known
+  project constraints.
 
 ## Build & Test
 
 ```bash
-zig build              # build static library + C header
-zig build test         # run unit tests
-zig build prop         # property-based tests (semiring laws, idempotency)
-zig build fuzz         # fuzz test harness
-zig build diff         # diff tests vs Pynini golden outputs (needs corpus)
+zig build              # build static library, C header, tools, benchmark
+zig build test         # unit tests
+zig build prop         # property tests
+zig build fuzz         # fuzz harness
+zig build diff         # differential tests vs corpus
+zig build att2lfst     # build converter at zig-out/bin/att2lfst
+zig build bench        # run benchmark
 ```
 
-## Project Structure
+Known gap: `zig build diff` includes a shortest-path corpus that expects `n=2`,
+while `src/ops/shortest-path.zig` intentionally supports only `n == 1`.
+Do not paper over this by pretending n-best exists; either implement real
+n-shortest paths or regenerate/retire that corpus case.
 
-```
+## Project Map
+
+```text
 src/
-  weight.zig          # TropicalWeight, LogWeight (f64 semirings)
-  arc.zig             # Arc(W), Label (u32), StateId (u32)
-  sym.zig             # SymbolTable: string <-> Label mapping
-  mutable-fst.zig     # MutableFst(W): build-time mutable FST
-  fst.zig             # Fst(W): frozen immutable FST (contiguous layout)
+  weight.zig          # TropicalWeight, LogWeight
+  arc.zig             # Arc(W), Label, StateId
+  sym.zig             # SymbolTable
+  mutable-fst.zig     # build-time mutable graph
+  fst.zig             # frozen contiguous graph
   string.zig          # compileString / printString
-  char-class.zig      # BYTE, ALPHA, DIGIT, UTF8_CHAR, SIGMA
-  c-api.zig           # stable C ABI exports (handle table + mutex)
+  char-class.zig      # byte and UTF-8 character classes
+  c-api.zig           # stable C ABI handle table
   lib.zig             # module root
-  ops/
-    compose.zig       # epsilon-sequencing filter composition
-    determinize.zig   # subset construction
-    minimize.zig      # Hopcroft partition refinement
-    rm-epsilon.zig    # epsilon closure + redirect
-    shortest-path.zig # n-best paths
-    union.zig         # FST union
-    concat.zig        # FST concatenation
-    closure.zig       # Kleene star/plus/optional + repeat
-    invert.zig        # swap input/output labels
-    project.zig       # project to one tape
-    difference.zig    # complement + compose
-    replace.zig       # recursive substitution + cycle detection
-    reverse.zig       # reverse path directions
-    rewrite.zig       # context-dependent rewrite (Mohri & Sproat)
-    optimize.zig      # rmEpsilon → determinize → minimize pipeline
   io/
     text.zig          # OpenFst AT&T text format
-    binary.zig        # mmap-friendly binary snapshot
+    binary.zig        # native binary snapshot
+  ops/
+    compose.zig
+    compose-shortest-path.zig
+    connect.zig
+    determinize.zig
+    minimize.zig
+    rm-epsilon.zig
+    shortest-path.zig
+    union.zig
+    concat.zig
+    closure.zig
+    invert.zig
+    project.zig
+    difference.zig
+    replace.zig
+    reverse.zig
+    rewrite.zig
+    optimize.zig
+  tools/
+    att2lfst.zig
 include/
-  fst.h               # C header (u32 handles, not pointers)
+  fst.h
 tests/
-  gen_golden.py       # Pynini golden output generator
-  diff/               # differential tests vs golden corpus
-  prop/               # property-based tests
-  fuzz/               # fuzz test harness
-  corpus/             # AT&T text golden files (generated)
-references/
-  zig-memory-management.md  # Zig memory patterns & pitfalls reference
-build.zig             # Zig 0.15 build configuration
+  prop/
+  fuzz/
+  diff/
+  corpus/
 ```
 
-## Zig Version
+## Architecture Rules
 
-- **Zig 0.15.2** — uses the new `Build.addLibrary` / `Build.createModule` API (not the old `addStaticLibrary`)
+- Keep the core algorithms pure with explicit allocator/data inputs. File I/O,
+  process spawning, environment reads, and clocks belong at the edge.
+- Validate external data at the boundary, then convert into `MutableFst` or
+  `Fst` before running algorithms.
+- Prefer small transformation functions over long flows that mix parsing,
+  mutation, and algorithmic decisions.
+- Make expected failures explicit in return errors. Do not silently coerce an
+  unsupported operation into a partial result.
 
-## Architecture & Design References
+## Memory & Thread Safety
 
-### OpenFST Concepts
+- Operations use an arena for temporaries and return results allocated by the
+  caller's allocator.
+- `MutableFst` is single-owner mutable state.
+- `Fst` is immutable, contiguous, and safe for concurrent reads.
+- C consumers receive `u32` handles, never raw pointers.
+- The C API handle table uses generation and pin counts to avoid use-after-free
+  while allowing heavy algorithms to run outside the global table lock.
 
-Core FST operations to implement:
-- **Compose** — combine two FSTs (key operation for text normalization pipelines)
-- **ShortestPath** — find best path through weighted FST
-- **Union / Concat / Closure** — regular expression-like FST construction
-- **Determinize / Minimize** — optimize FST for compact representation
-- **Arc types** — StdArc (tropical semiring), LogArc (log semiring)
+## Conventions
 
-### WeTextProcessing Runtime Pattern
-
-The C++ runtime uses OpenFST with this pipeline:
-1. **Tagger FST** — maps input text to tagged tokens (e.g., `"123" → integer { value: "123" }`)
-2. **Token Parser** — parses tagged output into structured tokens
-3. **Verbalizer FST** — converts structured tokens back to verbalized text
-4. **Compose + ShortestPath** — core operations for FST-based string rewriting
-
-### Key Data Structures
-
-- `StdVectorFst` — mutable FST with vector-based state/arc storage
-- `StringCompiler<StdArc>` — compile string to single-path FST
-- `StringPrinter<StdArc>` — extract string from single-path FST
-
-## Memory Safety Conventions
-
-Key conventions enforced in this codebase:
-
-- **Arena per algorithm**: All ops (determinize, compose, etc.) use `ArenaAllocator` for temporaries. Result FST uses the caller's allocator. Temps are bulk-freed on return.
-- **Generation counter**: `MutableFst.generation` increments on every mutation. Use `gen()` / `checkGeneration()` to detect stale arc slices in debug builds.
-- **Handle table for C API**: `c-api.zig` uses `HandleTable(T)` with `u32` indices and `std.Thread.Mutex`. C consumers never touch raw pointers. Prevents double-free, use-after-free, type confusion. Thread-safe for concurrent calls.
-- **Two-phase model**: Build with `MutableFst` (single-owner, mutable), freeze into `Fst` (immutable, contiguous, thread-safe). Runtime code only touches `Fst`.
-
-## Coding Conventions
-
-- Modern Zig idioms (0.15+)
-- No barrel files
-- `kebab-case` file names
-- `type` over `interface` equivalent patterns
-- Explicit `allocator` parameter passing (Zig convention)
-- Test blocks colocated in source files
-
-## Package Manager
-
-- Use `bun` for any JS/TS tooling
-- Use `zig build` for Zig compilation
+- File names are `kebab-case`.
+- Test blocks stay near the code they cover unless they need a separate corpus.
+- Comments should explain non-obvious trade-offs or invariants, not restate the
+  line of code.
+- If a workaround or unsupported case remains, add it to `.agents/backlog.md`
+  with a short note before finishing the change.

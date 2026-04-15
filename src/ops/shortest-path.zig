@@ -58,10 +58,10 @@ pub fn shortestPath(comptime W: type, allocator: Allocator, fst: *const mutable_
             return std.math.order(a.state, b.state);
         }
     }.call;
-    var queue = std.PriorityQueue(QueueItem, void, queueCompare).init(arena, {});
-    try queue.add(.{ .state = fst.start(), .dist = W.one });
+    var queue = std.PriorityQueue(QueueItem, void, queueCompare).initContext({});
+    try queue.push(arena, .{ .state = fst.start(), .dist = W.one });
 
-    while (queue.removeOrNull()) |item| {
+    while (queue.pop()) |item| {
         const s = item.state;
         if (settled[s]) continue;
         if (W.compare(item.dist, dist[s]) != .eq) continue; // stale queue entry
@@ -79,7 +79,7 @@ pub fn shortestPath(comptime W: type, allocator: Allocator, fst: *const mutable_
                 dist[next] = new_dist;
                 back[next] = .{ .prev_state = s, .arc_idx = @intCast(ai) };
                 if (!settled[next]) {
-                    try queue.add(.{ .state = next, .dist = new_dist });
+                    try queue.push(arena, .{ .state = next, .dist = new_dist });
                 }
             }
         }

@@ -144,10 +144,13 @@ zig build bench -Doptimize=ReleaseFast -- \
 To generate golden corpus for diff tests:
 
 ```bash
-pip install pynini
+uv pip install pynini
 python tests/gen_golden.py
 zig build diff
 ```
+
+Current limitation: the checked-in shortest-path differential fixture expects
+`n=2`, while the implementation intentionally supports only `n=1`.
 
 ## Architecture
 
@@ -161,7 +164,8 @@ Labels: `u32` (0 = epsilon). StateId: `u32` (maxInt = no_state sentinel).
 
 ## Zig Version
 
-**Zig 0.15.2** — uses `Build.addLibrary` / `Build.createModule` API.
+**Zig 0.16.0** — uses `Build.addLibrary` / `Build.createModule` API and the
+`std.Io` I/O model.
 
 ## Rewrite Semantics Notes
 

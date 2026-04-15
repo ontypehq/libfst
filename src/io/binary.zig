@@ -6,26 +6,26 @@ const Allocator = std.mem.Allocator;
 
 /// Write a frozen Fst to a file in binary format.
 /// The file is a direct dump of the contiguous byte buffer.
-pub fn writeBinary(comptime W: type, fst: *const fst_mod.Fst(W), path: []const u8) !void {
-    const file = try std.fs.cwd().createFile(path, .{});
-    defer file.close();
-    try file.writeAll(fst.bytes);
+pub fn writeBinary(comptime W: type, fst: *const fst_mod.Fst(W), io: std.Io, path: []const u8) !void {
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, fst.bytes);
 }
 
-/// Read a frozen Fst from a binary file using mmap for zero-copy loading.
-pub fn readBinary(comptime W: type, allocator: Allocator, path: []const u8) !fst_mod.Fst(W) {
-    // For now, read the whole file into memory (mmap can be added later)
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+/// Read a frozen Fst from a binary file.
+pub fn readBinary(comptime W: type, allocator: Allocator, io: std.Io, path: []const u8) !fst_mod.Fst(W) {
+    // Read into owned memory so the returned FST has an allocator-backed lifetime.
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     const size = stat.size;
     if (size < @sizeOf(fst_mod.Header)) return error.InvalidFormat;
 
     const bytes = try allocator.alignedAlloc(u8, .@"8", size);
     errdefer allocator.free(bytes);
 
-    const read_n = try file.readAll(bytes);
+    const read_n = try file.readPositionalAll(io, bytes, 0);
     if (read_n != size) return error.UnexpectedEof;
 
     var result = try fst_mod.Fst(W).fromBytes(bytes);
@@ -60,11 +60,11 @@ test "binary: write and read roundtrip" {
 
     // Write to temp file
     const tmp_path = "/tmp/libfst_test_binary.fst";
-    try writeBinary(W, &frozen, tmp_path);
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    try writeBinary(W, &frozen, std.testing.io, tmp_path);
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_path) catch {};
 
     // Read back
-    var loaded = try readBinary(W, allocator, tmp_path);
+    var loaded = try readBinary(W, allocator, std.testing.io, tmp_path);
     defer loaded.deinit();
 
     try std.testing.expectEqual(frozen.start(), loaded.start());

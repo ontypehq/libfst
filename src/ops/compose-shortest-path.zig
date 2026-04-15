@@ -65,7 +65,7 @@ pub fn composeShortestPath(comptime W: type, allocator: Allocator, fst1: anytype
     var dist: std.ArrayList(W) = .empty;
     var back: std.ArrayList(?BackPtr) = .empty;
     var settled: std.ArrayList(bool) = .empty;
-    var queue = std.PriorityQueue(QueueItem, void, queueCompare).init(arena, {});
+    var queue = std.PriorityQueue(QueueItem, void, queueCompare).initContext({});
 
     const getOrCreate = struct {
         fn call(
@@ -135,7 +135,7 @@ pub fn composeShortestPath(comptime W: type, allocator: Allocator, fst1: anytype
                 .weight = edge_weight,
             };
             if (!slist.items[next_id]) {
-                try pq.add(.{
+                try pq.push(a, .{
                     .tuple_id = next_id,
                     .dist = new_dist,
                 });
@@ -150,13 +150,13 @@ pub fn composeShortestPath(comptime W: type, allocator: Allocator, fst1: anytype
     };
     const init_id = try getOrCreate(&tuple_to_id, &tuples, &dist, &back, &settled, arena, init_tuple);
     dist.items[init_id] = W.one;
-    try queue.add(.{ .tuple_id = init_id, .dist = W.one });
+    try queue.push(arena, .{ .tuple_id = init_id, .dist = W.one });
 
     var best_final_id: ?u32 = null;
     var best_final_weight = W.zero;
     var best_total = W.zero;
 
-    while (queue.removeOrNull()) |item| {
+    while (queue.pop()) |item| {
         const curr_id = item.tuple_id;
         if (settled.items[curr_id]) continue;
         if (W.compare(item.dist, dist.items[curr_id]) != .eq) continue; // stale entry

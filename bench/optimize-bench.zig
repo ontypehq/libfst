@@ -120,10 +120,7 @@ fn printUsage(out: *std.Io.Writer) !void {
     );
 }
 
-fn parseOptions(allocator: Allocator) !Options {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
+fn parseOptions(args: []const [:0]const u8) !Options {
     var opts = Options{};
     var i: usize = 1;
     while (i < args.len) {
@@ -418,6 +415,7 @@ fn runScenarioOnce(scenario: Scenario, allocator: Allocator, inputs: *const Inpu
 
 fn benchmark(
     out: *std.Io.Writer,
+    io: std.Io,
     allocator: Allocator,
     opts: Options,
     inputs: *const Inputs,
@@ -428,9 +426,9 @@ fn benchmark(
 
     var stats = BenchStats{};
     for (0..opts.iterations) |iter| {
-        var timer = try std.time.Timer.start();
+        const start = std.Io.Clock.now(.awake, io);
         const states = try runScenarioOnce(opts.scenario, allocator, inputs);
-        const ns = timer.read();
+        const ns: u64 = @intCast(start.untilNow(io, .awake).toNanoseconds());
 
         stats.total_ns += ns;
         stats.min_ns = @min(stats.min_ns, ns);
@@ -474,14 +472,16 @@ fn scenarioName(scenario: Scenario) []const u8 {
     };
 }
 
-pub fn main() !void {
-    const allocator = std.heap.c_allocator;
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var out_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&out_buf);
+    var stdout_writer = std.Io.File.stdout().writer(io, &out_buf);
     const out = &stdout_writer.interface;
 
-    const opts = parseOptions(allocator) catch |err| switch (err) {
+    const opts = parseOptions(args) catch |err| switch (err) {
         error.ShowUsage => {
             try printUsage(out);
             try out.flush();
@@ -499,7 +499,7 @@ pub fn main() !void {
     var inputs = try initInputs(allocator, opts.len, transducer_len, opts.branches);
     defer inputs.deinit();
 
-    const stats = try benchmark(out, allocator, opts, &inputs);
+    const stats = try benchmark(out, io, allocator, opts, &inputs);
     const avg_ns = stats.total_ns / opts.iterations;
     const avg_us = @as(f64, @floatFromInt(avg_ns)) / @as(f64, std.time.ns_per_us);
     const avg_states = stats.total_states / opts.iterations;

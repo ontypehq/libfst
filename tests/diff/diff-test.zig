@@ -28,13 +28,10 @@ const CORPUS_DIR = "tests/corpus/";
 fn readCorpusFile(allocator: std.mem.Allocator, filename: []const u8) !MutableFst {
     var path_buf: [512]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{ CORPUS_DIR, filename }) catch unreachable;
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+    const content = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(64 * 1024 * 1024)) catch |err| {
         std.debug.print("Cannot open {s}: {any}\n", .{ path, err });
         return err;
     };
-    defer file.close();
-
-    const content = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
     defer allocator.free(content);
 
     return io_text.readText(W, allocator, content);
@@ -62,7 +59,7 @@ fn fstEquivalent(allocator: std.mem.Allocator, a: *const MutableFst, b: *const M
     var b_to_a = std.AutoHashMap(StateId, StateId).init(allocator);
     defer b_to_a.deinit();
 
-    var queue = std.ArrayListUnmanaged(StateId).empty;
+    var queue = std.ArrayList(StateId).empty;
     defer queue.deinit(allocator);
 
     try a_to_b.put(a.start(), b.start());
@@ -131,16 +128,16 @@ fn arcLessThan(_: void, lhs: A, rhs: A) bool {
 fn expectEquivalent(allocator: std.mem.Allocator, result: *const MutableFst, golden: *const MutableFst) !void {
     if (!try fstEquivalent(allocator, result, golden)) {
         std.debug.print("\n=== RESULT ({d} states, {d} arcs) ===\n", .{ result.numStates(), result.totalArcs() });
-        var buf_r = std.ArrayListUnmanaged(u8).empty;
-        defer buf_r.deinit(allocator);
-        try io_text.writeText(W, result, buf_r.writer(allocator));
-        std.debug.print("{s}\n", .{buf_r.items});
+        var buf_r = std.Io.Writer.Allocating.init(allocator);
+        defer buf_r.deinit();
+        try io_text.writeText(W, result, &buf_r.writer);
+        std.debug.print("{s}\n", .{buf_r.written()});
 
         std.debug.print("=== GOLDEN ({d} states, {d} arcs) ===\n", .{ golden.numStates(), golden.totalArcs() });
-        var buf_g = std.ArrayListUnmanaged(u8).empty;
-        defer buf_g.deinit(allocator);
-        try io_text.writeText(W, golden, buf_g.writer(allocator));
-        std.debug.print("{s}\n", .{buf_g.items});
+        var buf_g = std.Io.Writer.Allocating.init(allocator);
+        defer buf_g.deinit();
+        try io_text.writeText(W, golden, &buf_g.writer);
+        std.debug.print("{s}\n", .{buf_g.written()});
 
         return error.TestExpectedEqual;
     }

@@ -30,13 +30,35 @@ const no_state = arc_mod.no_state;
 
 const alloc = std.heap.c_allocator;
 
+fn defaultIo() std.Io {
+    // C ABI entry points do not receive Zig's `std.process.Init`; keep the
+    // 0.16 fallback I/O choice centralized instead of leaking it across calls.
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+fn traceNowNs() i128 {
+    return @intCast(std.Io.Clock.now(.awake, defaultIo()).toNanoseconds());
+}
+
+const ApiMutex = struct {
+    inner: std.Io.Mutex = .init,
+
+    fn lock(self: *ApiMutex) void {
+        self.inner.lockUncancelable(defaultIo());
+    }
+
+    fn unlock(self: *ApiMutex) void {
+        self.inner.unlock(defaultIo());
+    }
+};
+
 var compose_trace_checked: bool = false;
 var compose_trace_enabled: bool = false;
 
 fn isComposeTraceEnabled() bool {
     if (!compose_trace_checked) {
         compose_trace_checked = true;
-        compose_trace_enabled = std.posix.getenv("LIBFST_TRACE_COMPOSE") != null;
+        compose_trace_enabled = std.c.getenv("LIBFST_TRACE_COMPOSE") != null;
     }
     return compose_trace_enabled;
 }
@@ -62,7 +84,7 @@ fn traceComposeFrozen(
     if (!isComposeTraceEnabled()) return;
 
     var err_buf: [512]u8 = undefined;
-    var err_writer = std.fs.File.stderr().writer(&err_buf);
+    var err_writer = std.Io.File.stderr().writer(defaultIo(), &err_buf);
     const err = &err_writer.interface;
     err.print(
         "[libfst] {s} op=fst_compose_frozen a={d} b={d} in_states={d} in_arcs={d} out_states={d} out_arcs={d} elapsed_us={d}\n",
@@ -217,7 +239,7 @@ var fst_table: HandleTable(Fst) = .{};
 /// Global mutex protects handle tables and short critical sections.
 /// Heavy algorithms run outside this lock using mutable snapshots and
 /// optionally pinned immutable handles.
-var api_mutex: std.Thread.Mutex = .{};
+var api_mutex: ApiMutex = .{};
 
 fn mutableDeinit(ptr: *MutableFst) void {
     ptr.deinit();
@@ -304,18 +326,41 @@ fn cloneMutableOwned(src: *const MutableFst) !MutableFst {
     return src.clone(alloc);
 }
 
+fn resolveExecutableFromPath(name: []const u8) ![]u8 {
+    if (std.mem.findScalar(u8, name, '/') != null) {
+        return try alloc.dupe(u8, name);
+    }
+
+    const path_z = std.c.getenv("PATH") orelse return try alloc.dupe(u8, name);
+    var dirs = std.mem.splitScalar(u8, std.mem.span(path_z), ':');
+    while (dirs.next()) |dir| {
+        if (dir.len == 0) continue;
+        const candidate = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name });
+        std.Io.Dir.cwd().access(defaultIo(), candidate, .{ .execute = true }) catch {
+            alloc.free(candidate);
+            continue;
+        };
+        return candidate;
+    }
+
+    return try alloc.dupe(u8, name);
+}
+
 fn loadOpenFstViaFstPrint(path: []const u8) !Fst {
-    const argv = [_][]const u8{ "fstprint", path };
-    const result = try std.process.Child.run(.{
-        .allocator = alloc,
+    const fstprint = try resolveExecutableFromPath("fstprint");
+    defer alloc.free(fstprint);
+
+    const argv = [_][]const u8{ fstprint, path };
+    const result = try std.process.run(alloc, defaultIo(), .{
         .argv = &argv,
-        .max_output_bytes = 512 * 1024 * 1024,
+        .stdout_limit = .limited(512 * 1024 * 1024),
+        .stderr_limit = .limited(512 * 1024 * 1024),
     });
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) return error.ExternalToolFailed;
         },
         else => return error.ExternalToolFailed,
@@ -500,10 +545,7 @@ export fn fst_get_arcs(handle: u32, state: u32, buf: ?[*]CFstArc, buf_len: u32) 
 
 export fn fst_read_text(path: ?[*:0]const u8) callconv(.c) u32 {
     const p = path orelse return invalid_handle;
-    const file = std.fs.cwd().openFileZ(p, .{}) catch return invalid_handle;
-    defer file.close();
-
-    const content = file.readToEndAlloc(alloc, 64 * 1024 * 1024) catch return invalid_handle;
+    const content = std.Io.Dir.cwd().readFileAlloc(defaultIo(), std.mem.span(p), alloc, .limited(64 * 1024 * 1024)) catch return invalid_handle;
     defer alloc.free(content);
 
     var fst = io_text.readText(W, alloc, content) catch return invalid_handle;
@@ -517,7 +559,7 @@ export fn fst_read_text(path: ?[*:0]const u8) callconv(.c) u32 {
 export fn fst_load(path: ?[*:0]const u8) callconv(.c) u32 {
     const p = path orelse return invalid_handle;
     const slice = std.mem.span(p);
-    var fst = io_binary.readBinary(W, alloc, slice) catch return invalid_handle;
+    var fst = io_binary.readBinary(W, alloc, defaultIo(), slice) catch return invalid_handle;
     api_mutex.lock();
     const h = newFstHandle(fst);
     api_mutex.unlock();
@@ -550,7 +592,7 @@ export fn fst_save(handle: u32, path: ?[*:0]const u8) callconv(.c) FstError {
     api_mutex.unlock();
     defer snapshot.deinit();
 
-    io_binary.writeBinary(W, &snapshot, std.mem.span(p)) catch return .io_error;
+    io_binary.writeBinary(W, &snapshot, defaultIo(), std.mem.span(p)) catch return .io_error;
     return .ok;
 }
 
@@ -590,17 +632,17 @@ export fn fst_compose(a_handle: u32, b_handle: u32) callconv(.c) u32 {
 
 export fn fst_compose_frozen(a_handle: u32, b_handle: u32) callconv(.c) u32 {
     const trace = isComposeTraceEnabled();
-    const t0: i128 = if (trace) std.time.nanoTimestamp() else 0;
+    const t0: i128 = if (trace) traceNowNs() else 0;
 
     api_mutex.lock();
     const ha = mutable_table.getConst(a_handle) orelse {
         api_mutex.unlock();
-        if (trace) traceComposeFrozen("invalid_a", a_handle, b_handle, 0, 0, 0, 0, std.time.nanoTimestamp() - t0);
+        if (trace) traceComposeFrozen("invalid_a", a_handle, b_handle, 0, 0, 0, 0, traceNowNs() - t0);
         return invalid_handle;
     };
     var a_snapshot = cloneMutableOwned(ha) catch {
         api_mutex.unlock();
-        if (trace) traceComposeFrozen("clone_a_oom", a_handle, b_handle, 0, 0, 0, 0, std.time.nanoTimestamp() - t0);
+        if (trace) traceComposeFrozen("clone_a_oom", a_handle, b_handle, 0, 0, 0, 0, traceNowNs() - t0);
         return invalid_handle;
     };
     const hb = fst_table.pinConst(b_handle) orelse {
@@ -615,7 +657,7 @@ export fn fst_compose_frozen(a_handle: u32, b_handle: u32) callconv(.c) u32 {
                 mutableTotalArcs(&a_snapshot),
                 0,
                 0,
-                std.time.nanoTimestamp() - t0,
+                traceNowNs() - t0,
             );
         }
         return invalid_handle;
@@ -632,7 +674,7 @@ export fn fst_compose_frozen(a_handle: u32, b_handle: u32) callconv(.c) u32 {
     const in_arcs: usize = if (trace) mutableTotalArcs(&a_snapshot) else 0;
 
     var result = compose_mod.compose(W, alloc, &a_snapshot, hb) catch {
-        if (trace) traceComposeFrozen("compose_error", a_handle, b_handle, in_states, in_arcs, 0, 0, std.time.nanoTimestamp() - t0);
+        if (trace) traceComposeFrozen("compose_error", a_handle, b_handle, in_states, in_arcs, 0, 0, traceNowNs() - t0);
         return invalid_handle;
     };
     if (trace) {
@@ -644,14 +686,14 @@ export fn fst_compose_frozen(a_handle: u32, b_handle: u32) callconv(.c) u32 {
             in_arcs,
             result.numStates(),
             mutableTotalArcs(&result),
-            std.time.nanoTimestamp() - t0,
+            traceNowNs() - t0,
         );
     }
     api_mutex.lock();
     const h = newMutableHandle(result);
     api_mutex.unlock();
     if (h == invalid_handle) {
-        if (trace) traceComposeFrozen("new_handle_oom", a_handle, b_handle, in_states, in_arcs, result.numStates(), mutableTotalArcs(&result), std.time.nanoTimestamp() - t0);
+        if (trace) traceComposeFrozen("new_handle_oom", a_handle, b_handle, in_states, in_arcs, result.numStates(), mutableTotalArcs(&result), traceNowNs() - t0);
         result.deinit();
     }
     return h;
@@ -659,17 +701,17 @@ export fn fst_compose_frozen(a_handle: u32, b_handle: u32) callconv(.c) u32 {
 
 export fn fst_compose_frozen_shortest_path(a_handle: u32, b_handle: u32, n: u32) callconv(.c) u32 {
     const trace = isComposeTraceEnabled();
-    const t0: i128 = if (trace) std.time.nanoTimestamp() else 0;
+    const t0: i128 = if (trace) traceNowNs() else 0;
 
     api_mutex.lock();
     const ha = mutable_table.getConst(a_handle) orelse {
         api_mutex.unlock();
-        if (trace) traceComposeFrozen("sp_invalid_a", a_handle, b_handle, 0, 0, 0, 0, std.time.nanoTimestamp() - t0);
+        if (trace) traceComposeFrozen("sp_invalid_a", a_handle, b_handle, 0, 0, 0, 0, traceNowNs() - t0);
         return invalid_handle;
     };
     var a_snapshot = cloneMutableOwned(ha) catch {
         api_mutex.unlock();
-        if (trace) traceComposeFrozen("sp_clone_a_oom", a_handle, b_handle, 0, 0, 0, 0, std.time.nanoTimestamp() - t0);
+        if (trace) traceComposeFrozen("sp_clone_a_oom", a_handle, b_handle, 0, 0, 0, 0, traceNowNs() - t0);
         return invalid_handle;
     };
     const hb = fst_table.pinConst(b_handle) orelse {
@@ -684,7 +726,7 @@ export fn fst_compose_frozen_shortest_path(a_handle: u32, b_handle: u32, n: u32)
                 mutableTotalArcs(&a_snapshot),
                 0,
                 0,
-                std.time.nanoTimestamp() - t0,
+                traceNowNs() - t0,
             );
         }
         return invalid_handle;
@@ -701,7 +743,7 @@ export fn fst_compose_frozen_shortest_path(a_handle: u32, b_handle: u32, n: u32)
     const in_arcs: usize = if (trace) mutableTotalArcs(&a_snapshot) else 0;
 
     var result = compose_shortest_path_mod.composeShortestPath(W, alloc, &a_snapshot, hb, n) catch {
-        if (trace) traceComposeFrozen("sp_compose_error", a_handle, b_handle, in_states, in_arcs, 0, 0, std.time.nanoTimestamp() - t0);
+        if (trace) traceComposeFrozen("sp_compose_error", a_handle, b_handle, in_states, in_arcs, 0, 0, traceNowNs() - t0);
         return invalid_handle;
     };
     if (trace) {
@@ -713,14 +755,14 @@ export fn fst_compose_frozen_shortest_path(a_handle: u32, b_handle: u32, n: u32)
             in_arcs,
             result.numStates(),
             mutableTotalArcs(&result),
-            std.time.nanoTimestamp() - t0,
+            traceNowNs() - t0,
         );
     }
     api_mutex.lock();
     const h = newMutableHandle(result);
     api_mutex.unlock();
     if (h == invalid_handle) {
-        if (trace) traceComposeFrozen("sp_new_handle_oom", a_handle, b_handle, in_states, in_arcs, result.numStates(), mutableTotalArcs(&result), std.time.nanoTimestamp() - t0);
+        if (trace) traceComposeFrozen("sp_new_handle_oom", a_handle, b_handle, in_states, in_arcs, result.numStates(), mutableTotalArcs(&result), traceNowNs() - t0);
         result.deinit();
     }
     return h;

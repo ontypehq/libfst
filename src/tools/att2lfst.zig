@@ -16,7 +16,7 @@ fn printUsage() void {
     );
 }
 
-fn parseArgs(args: []const []const u8) !struct { input: []const u8, output: []const u8 } {
+fn parseArgs(args: []const [:0]const u8) !struct { input: []const u8, output: []const u8 } {
     if (args.len != 5) return CliError.InvalidArguments;
     if (!std.mem.eql(u8, args[1], "--input")) return CliError.InvalidArguments;
     if (!std.mem.eql(u8, args[3], "--output")) return CliError.InvalidArguments;
@@ -26,23 +26,21 @@ fn parseArgs(args: []const []const u8) !struct { input: []const u8, output: []co
     };
 }
 
-pub fn main() !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa_state.deinit();
-    const allocator = gpa_state.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     const parsed = parseArgs(args) catch {
         printUsage();
         return CliError.InvalidArguments;
     };
 
-    const input_data = try std.fs.cwd().readFileAlloc(
-        allocator,
+    const input_data = try std.Io.Dir.cwd().readFileAlloc(
+        io,
         parsed.input,
-        256 * 1024 * 1024,
+        allocator,
+        .limited(256 * 1024 * 1024),
     );
     defer allocator.free(input_data);
 
@@ -64,7 +62,7 @@ pub fn main() !void {
     var frozen = try FrozenFst.fromMutable(allocator, &mutable);
     defer frozen.deinit();
 
-    try libfst.io_binary.writeBinary(W, &frozen, parsed.output);
+    try libfst.io_binary.writeBinary(W, &frozen, io, parsed.output);
 
     var total_arcs: u64 = 0;
     for (0..frozen.numStates()) |i| {

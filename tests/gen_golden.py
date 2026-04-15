@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate golden AT&T text outputs using Pynini for diff testing.
 
-Requires: pip install pynini
+Requires: uv pip install pynini
 
 Each test case generates:
   tests/corpus/{test_name}.input.att   — input FST(s)
@@ -18,7 +18,7 @@ try:
     import pynini
     from pynini.lib import rewrite as rw
 except ImportError:
-    print("ERROR: pynini not installed. Install with: pip install pynini", file=sys.stderr)
+    print("ERROR: pynini not installed. Install with: uv pip install pynini", file=sys.stderr)
     sys.exit(1)
 
 CORPUS_DIR = os.path.join(os.path.dirname(__file__), "corpus")
