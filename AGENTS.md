@@ -104,8 +104,6 @@ The C++ runtime uses OpenFST with this pipeline:
 
 ## Memory Safety Conventions
 
-See **[references/zig-memory-management.md](references/zig-memory-management.md)** for the full Zig memory management reference (allocator patterns, pitfalls, testing strategies).
-
 Key conventions enforced in this codebase:
 
 - **Arena per algorithm**: All ops (determinize, compose, etc.) use `ArenaAllocator` for temporaries. Result FST uses the caller's allocator. Temps are bulk-freed on return.

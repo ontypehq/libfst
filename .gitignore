@@ -2,3 +2,6 @@
 zig-out/
 .agentspace/
 .env
+.agents/
+.claude/
+skills-lock.json
