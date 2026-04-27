@@ -73,8 +73,8 @@ fn mutableTotalArcs(fst: *const MutableFst) usize {
 
 fn traceComposeFrozen(
     tag: []const u8,
-    a_handle: u32,
-    b_handle: u32,
+    a_handle: Handle,
+    b_handle: Handle,
     in_states: usize,
     in_arcs: usize,
     out_states: usize,
@@ -103,129 +103,169 @@ fn traceComposeFrozen(
 }
 
 // ── Handle table ──
-// Prevents double-free, use-after-free, and type confusion at the C boundary.
-// C consumers receive opaque u32 handles, never raw pointers.
+// Prevents double-free, stale-handle reuse, and type confusion at the C boundary.
+// C consumers receive opaque u64 handles, never raw pointers.
 
-const invalid_handle: u32 = std.math.maxInt(u32);
+const Handle = u64;
+const SlotIndex = u32;
+const invalid_handle: Handle = std.math.maxInt(Handle);
+const invalid_slot: SlotIndex = std.math.maxInt(SlotIndex);
+
+const DecodedHandle = struct {
+    index: SlotIndex,
+    generation: u32,
+};
+
+fn encodeHandle(index: SlotIndex, generation: u32) Handle {
+    return (@as(Handle, generation) << 32) | @as(Handle, index);
+}
+
+fn decodeHandle(handle: Handle) ?DecodedHandle {
+    if (handle == invalid_handle) return null;
+    const generation: u32 = @intCast(handle >> 32);
+    if (generation == 0) return null;
+    const index: SlotIndex = @intCast(handle & std.math.maxInt(u32));
+    if (index == invalid_slot) return null;
+    return .{ .index = index, .generation = generation };
+}
 
 fn HandleTable(comptime T: type) type {
     return struct {
         slots: std.ArrayList(?*T) = .empty,
-        free_list: std.ArrayList(u32) = .empty,
+        free_list: std.ArrayList(SlotIndex) = .empty,
         generations: std.ArrayList(u32) = .empty,
+        versions: std.ArrayList(u64) = .empty,
         pin_counts: std.ArrayList(u32) = .empty,
         pending_free: std.ArrayList(bool) = .empty,
 
         const Self = @This();
 
         /// Insert a new object. Caller MUST hold `api_mutex`.
-        fn insert(self: *Self, ptr: *T) u32 {
+        fn insert(self: *Self, ptr: *T) Handle {
             if (self.free_list.items.len > 0) {
                 const idx = self.free_list.pop().?;
                 self.generations.items[idx] +%= 1;
                 if (self.generations.items[idx] == 0) self.generations.items[idx] = 1;
                 self.slots.items[idx] = ptr;
+                self.versions.items[idx] = 0;
                 self.pin_counts.items[idx] = 0;
                 self.pending_free.items[idx] = false;
-                return idx;
+                return encodeHandle(idx, self.generations.items[idx]);
             }
             self.slots.append(alloc, ptr) catch return invalid_handle;
             self.generations.append(alloc, 1) catch {
                 _ = self.slots.pop();
                 return invalid_handle;
             };
+            self.versions.append(alloc, 0) catch {
+                _ = self.generations.pop();
+                _ = self.slots.pop();
+                return invalid_handle;
+            };
             self.pin_counts.append(alloc, 0) catch {
+                _ = self.versions.pop();
                 _ = self.generations.pop();
                 _ = self.slots.pop();
                 return invalid_handle;
             };
             self.pending_free.append(alloc, false) catch {
                 _ = self.pin_counts.pop();
+                _ = self.versions.pop();
                 _ = self.generations.pop();
                 _ = self.slots.pop();
                 return invalid_handle;
             };
-            return @intCast(self.slots.items.len - 1);
+            const idx: SlotIndex = @intCast(self.slots.items.len - 1);
+            return encodeHandle(idx, 1);
         }
 
         /// Caller MUST hold `api_mutex`.
-        fn get(self: *Self, handle: u32) ?*T {
-            if (handle >= self.slots.items.len) return null;
-            if (self.pending_free.items[handle]) return null;
-            return self.slots.items[handle];
+        fn get(self: *Self, handle: Handle) ?*T {
+            const decoded = self.validate(handle) orelse return null;
+            return self.slots.items[decoded.index];
         }
 
         /// Caller MUST hold `api_mutex`.
-        fn getConst(self: *Self, handle: u32) ?*const T {
-            if (handle >= self.slots.items.len) return null;
-            if (self.pending_free.items[handle]) return null;
-            return self.slots.items[handle];
+        fn getConst(self: *Self, handle: Handle) ?*const T {
+            const decoded = self.validate(handle) orelse return null;
+            return self.slots.items[decoded.index];
         }
 
         /// Caller MUST hold `api_mutex`.
-        fn generation(self: *Self, handle: u32) ?u32 {
-            if (handle >= self.generations.items.len) return null;
-            return self.generations.items[handle];
+        fn generation(self: *Self, handle: Handle) ?u64 {
+            const decoded = self.validate(handle) orelse return null;
+            return self.versions.items[decoded.index];
         }
 
         /// Caller MUST hold `api_mutex`.
-        fn bumpGeneration(self: *Self, handle: u32) bool {
-            if (handle >= self.generations.items.len) return false;
-            self.generations.items[handle] +%= 1;
-            if (self.generations.items[handle] == 0) self.generations.items[handle] = 1;
+        fn bumpGeneration(self: *Self, handle: Handle) bool {
+            const decoded = self.validate(handle) orelse return false;
+            self.versions.items[decoded.index] +%= 1;
             return true;
         }
 
         /// Pin a handle for lock-free read access.
         /// While pinned, remove() defers destruction until unpin().
         /// Caller MUST hold `api_mutex`.
-        fn pinConst(self: *Self, handle: u32) ?*const T {
-            if (handle >= self.slots.items.len) return null;
-            if (self.pending_free.items[handle]) return null;
-            const ptr = self.slots.items[handle] orelse return null;
-            self.pin_counts.items[handle] +%= 1;
-            if (self.pin_counts.items[handle] == 0) self.pin_counts.items[handle] = 1;
+        fn pinConst(self: *Self, handle: Handle) ?*const T {
+            const decoded = self.validate(handle) orelse return null;
+            const ptr = self.slots.items[decoded.index] orelse return null;
+            self.pin_counts.items[decoded.index] +%= 1;
+            if (self.pin_counts.items[decoded.index] == 0) self.pin_counts.items[decoded.index] = 1;
             return ptr;
         }
 
         /// Release a previously pinned handle.
         /// Caller MUST hold `api_mutex`.
-        fn unpin(self: *Self, handle: u32, deinit_fn: *const fn (*T) void) bool {
-            if (handle >= self.slots.items.len) return false;
-            if (self.pin_counts.items[handle] == 0) return false;
-            self.pin_counts.items[handle] -= 1;
-            if (self.pin_counts.items[handle] != 0) return true;
-            if (!self.pending_free.items[handle]) return true;
+        fn unpin(self: *Self, handle: Handle, deinit_fn: *const fn (*T) void) bool {
+            const decoded = decodeHandle(handle) orelse return false;
+            if (decoded.index >= self.slots.items.len) return false;
+            if (self.pin_counts.items[decoded.index] == 0) return false;
+            self.pin_counts.items[decoded.index] -= 1;
+            if (self.pin_counts.items[decoded.index] != 0) return true;
+            if (!self.pending_free.items[decoded.index]) return true;
 
-            const ptr = self.slots.items[handle] orelse {
-                self.pending_free.items[handle] = false;
+            const ptr = self.slots.items[decoded.index] orelse {
+                self.pending_free.items[decoded.index] = false;
                 return false;
             };
             deinit_fn(ptr);
             alloc.destroy(ptr);
-            self.slots.items[handle] = null;
-            self.pending_free.items[handle] = false;
-            _ = self.bumpGeneration(handle);
-            self.free_list.append(alloc, handle) catch {};
+            self.slots.items[decoded.index] = null;
+            self.pending_free.items[decoded.index] = false;
+            self.free_list.append(alloc, decoded.index) catch {};
             return true;
         }
 
         /// Remove and destroy the object. Caller MUST hold `api_mutex`.
-        fn remove(self: *Self, handle: u32, deinit_fn: *const fn (*T) void) bool {
-            if (handle >= self.slots.items.len) return false;
-            if (self.pending_free.items[handle]) return false;
-            const ptr = self.slots.items[handle] orelse return false;
-            if (self.pin_counts.items[handle] > 0) {
-                self.pending_free.items[handle] = true;
-                _ = self.bumpGeneration(handle);
+        fn remove(self: *Self, handle: Handle, deinit_fn: *const fn (*T) void) bool {
+            const decoded = self.validate(handle) orelse return false;
+            const ptr = self.slots.items[decoded.index] orelse return false;
+            if (self.pin_counts.items[decoded.index] > 0) {
+                self.pending_free.items[decoded.index] = true;
+                self.invalidateSlot(decoded.index);
                 return true;
             }
             deinit_fn(ptr);
             alloc.destroy(ptr);
-            self.slots.items[handle] = null;
-            _ = self.bumpGeneration(handle);
-            self.free_list.append(alloc, handle) catch {};
+            self.slots.items[decoded.index] = null;
+            self.invalidateSlot(decoded.index);
+            self.free_list.append(alloc, decoded.index) catch {};
             return true;
+        }
+
+        fn validate(self: *Self, handle: Handle) ?DecodedHandle {
+            const decoded = decodeHandle(handle) orelse return null;
+            if (decoded.index >= self.slots.items.len) return null;
+            if (self.pending_free.items[decoded.index]) return null;
+            if (self.generations.items[decoded.index] != decoded.generation) return null;
+            return decoded;
+        }
+
+        fn invalidateSlot(self: *Self, index: SlotIndex) void {
+            self.generations.items[index] +%= 1;
+            if (self.generations.items[index] == 0) self.generations.items[index] = 1;
+            self.versions.items[index] +%= 1;
         }
     };
 }
@@ -266,6 +306,7 @@ export fn fst_teardown() callconv(.c) void {
     mutable_table.slots.deinit(alloc);
     mutable_table.free_list.deinit(alloc);
     mutable_table.generations.deinit(alloc);
+    mutable_table.versions.deinit(alloc);
     mutable_table.pin_counts.deinit(alloc);
     mutable_table.pending_free.deinit(alloc);
     mutable_table = .{};
@@ -281,6 +322,7 @@ export fn fst_teardown() callconv(.c) void {
     fst_table.slots.deinit(alloc);
     fst_table.free_list.deinit(alloc);
     fst_table.generations.deinit(alloc);
+    fst_table.versions.deinit(alloc);
     fst_table.pin_counts.deinit(alloc);
     fst_table.pending_free.deinit(alloc);
     fst_table = .{};
@@ -288,7 +330,7 @@ export fn fst_teardown() callconv(.c) void {
 
 // Helpers to create and register objects
 
-fn newMutableHandle(fst: MutableFst) u32 {
+fn newMutableHandle(fst: MutableFst) Handle {
     const ptr = alloc.create(MutableFst) catch return invalid_handle;
     ptr.* = fst;
     const h = mutable_table.insert(ptr);
@@ -300,7 +342,7 @@ fn newMutableHandle(fst: MutableFst) u32 {
     return h;
 }
 
-fn newFstHandle(fst: Fst) u32 {
+fn newFstHandle(fst: Fst) Handle {
     const ptr = alloc.create(Fst) catch return invalid_handle;
     ptr.* = fst;
     const h = fst_table.insert(ptr);
@@ -392,13 +434,13 @@ pub const CFstArc = extern struct {
 
 // ── MutableFst lifecycle ──
 
-export fn fst_mutable_new() callconv(.c) u32 {
+export fn fst_mutable_new() callconv(.c) Handle {
     api_mutex.lock();
     defer api_mutex.unlock();
     return newMutableHandle(MutableFst.init(alloc));
 }
 
-export fn fst_mutable_clone(handle: u32) callconv(.c) u32 {
+export fn fst_mutable_clone(handle: Handle) callconv(.c) Handle {
     api_mutex.lock();
     const h = mutable_table.getConst(handle) orelse {
         api_mutex.unlock();
@@ -419,20 +461,20 @@ export fn fst_mutable_clone(handle: u32) callconv(.c) u32 {
     return rh;
 }
 
-export fn fst_mutable_free(handle: u32) callconv(.c) void {
+export fn fst_mutable_free(handle: Handle) callconv(.c) void {
     api_mutex.lock();
     defer api_mutex.unlock();
     _ = mutable_table.remove(handle, &mutableDeinit);
 }
 
-export fn fst_mutable_add_state(handle: u32) callconv(.c) u32 {
+export fn fst_mutable_add_state(handle: Handle) callconv(.c) u32 {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = mutable_table.get(handle) orelse return no_state;
     return h.addState() catch return no_state;
 }
 
-export fn fst_mutable_set_start(handle: u32, state: u32) callconv(.c) FstError {
+export fn fst_mutable_set_start(handle: Handle, state: u32) callconv(.c) FstError {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = mutable_table.get(handle) orelse return .invalid_arg;
@@ -441,7 +483,7 @@ export fn fst_mutable_set_start(handle: u32, state: u32) callconv(.c) FstError {
     return .ok;
 }
 
-export fn fst_mutable_set_final(handle: u32, state: u32, weight: f64) callconv(.c) FstError {
+export fn fst_mutable_set_final(handle: Handle, state: u32, weight: f64) callconv(.c) FstError {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = mutable_table.get(handle) orelse return .invalid_arg;
@@ -450,7 +492,7 @@ export fn fst_mutable_set_final(handle: u32, state: u32, weight: f64) callconv(.
     return .ok;
 }
 
-export fn fst_mutable_add_arc(handle: u32, src: u32, ilabel: u32, olabel: u32, weight: f64, nextstate: u32) callconv(.c) FstError {
+export fn fst_mutable_add_arc(handle: Handle, src: u32, ilabel: u32, olabel: u32, weight: f64, nextstate: u32) callconv(.c) FstError {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = mutable_table.get(handle) orelse return .invalid_arg;
@@ -462,7 +504,7 @@ export fn fst_mutable_add_arc(handle: u32, src: u32, ilabel: u32, olabel: u32, w
 
 // ── Freeze ──
 
-export fn fst_freeze(mutable_handle: u32) callconv(.c) u32 {
+export fn fst_freeze(mutable_handle: Handle) callconv(.c) Handle {
     api_mutex.lock();
     const mh = mutable_table.getConst(mutable_handle) orelse {
         api_mutex.unlock();
@@ -485,27 +527,27 @@ export fn fst_freeze(mutable_handle: u32) callconv(.c) u32 {
 
 // ── Fst (immutable) lifecycle ──
 
-export fn fst_free(handle: u32) callconv(.c) void {
+export fn fst_free(handle: Handle) callconv(.c) void {
     api_mutex.lock();
     defer api_mutex.unlock();
     _ = fst_table.remove(handle, &fstDeinit);
 }
 
-export fn fst_start(handle: u32) callconv(.c) u32 {
+export fn fst_start(handle: Handle) callconv(.c) u32 {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = fst_table.getConst(handle) orelse return no_state;
     return h.start();
 }
 
-export fn fst_num_states(handle: u32) callconv(.c) u32 {
+export fn fst_num_states(handle: Handle) callconv(.c) u32 {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = fst_table.getConst(handle) orelse return 0;
     return h.numStates();
 }
 
-export fn fst_num_arcs(handle: u32, state: u32) callconv(.c) u32 {
+export fn fst_num_arcs(handle: Handle, state: u32) callconv(.c) u32 {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = fst_table.getConst(handle) orelse return 0;
@@ -513,7 +555,7 @@ export fn fst_num_arcs(handle: u32, state: u32) callconv(.c) u32 {
     return h.numArcs(state);
 }
 
-export fn fst_final_weight(handle: u32, state: u32) callconv(.c) f64 {
+export fn fst_final_weight(handle: Handle, state: u32) callconv(.c) f64 {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = fst_table.getConst(handle) orelse return std.math.inf(f64);
@@ -521,7 +563,7 @@ export fn fst_final_weight(handle: u32, state: u32) callconv(.c) f64 {
     return h.finalWeight(state).value;
 }
 
-export fn fst_get_arcs(handle: u32, state: u32, buf: ?[*]CFstArc, buf_len: u32) callconv(.c) u32 {
+export fn fst_get_arcs(handle: Handle, state: u32, buf: ?[*]CFstArc, buf_len: u32) callconv(.c) u32 {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = fst_table.getConst(handle) orelse return 0;
@@ -543,7 +585,7 @@ export fn fst_get_arcs(handle: u32, state: u32, buf: ?[*]CFstArc, buf_len: u32) 
 
 // ── I/O ──
 
-export fn fst_read_text(path: ?[*:0]const u8) callconv(.c) u32 {
+export fn fst_read_text(path: ?[*:0]const u8) callconv(.c) Handle {
     const p = path orelse return invalid_handle;
     const content = std.Io.Dir.cwd().readFileAlloc(defaultIo(), std.mem.span(p), alloc, .limited(64 * 1024 * 1024)) catch return invalid_handle;
     defer alloc.free(content);
@@ -556,7 +598,7 @@ export fn fst_read_text(path: ?[*:0]const u8) callconv(.c) u32 {
     return h;
 }
 
-export fn fst_load(path: ?[*:0]const u8) callconv(.c) u32 {
+export fn fst_load(path: ?[*:0]const u8) callconv(.c) Handle {
     const p = path orelse return invalid_handle;
     const slice = std.mem.span(p);
     var fst = io_binary.readBinary(W, alloc, defaultIo(), slice) catch return invalid_handle;
@@ -567,7 +609,7 @@ export fn fst_load(path: ?[*:0]const u8) callconv(.c) u32 {
     return h;
 }
 
-export fn fst_load_openfst(path: ?[*:0]const u8) callconv(.c) u32 {
+export fn fst_load_openfst(path: ?[*:0]const u8) callconv(.c) Handle {
     const p = path orelse return invalid_handle;
     const slice = std.mem.span(p);
     var fst = loadOpenFstViaFstPrint(slice) catch return invalid_handle;
@@ -578,7 +620,7 @@ export fn fst_load_openfst(path: ?[*:0]const u8) callconv(.c) u32 {
     return h;
 }
 
-export fn fst_save(handle: u32, path: ?[*:0]const u8) callconv(.c) FstError {
+export fn fst_save(handle: Handle, path: ?[*:0]const u8) callconv(.c) FstError {
     const p = path orelse return .invalid_arg;
     api_mutex.lock();
     const h = fst_table.getConst(handle) orelse {
@@ -598,7 +640,7 @@ export fn fst_save(handle: u32, path: ?[*:0]const u8) callconv(.c) FstError {
 
 // ── Operations ──
 
-export fn fst_compose(a_handle: u32, b_handle: u32) callconv(.c) u32 {
+export fn fst_compose(a_handle: Handle, b_handle: Handle) callconv(.c) Handle {
     api_mutex.lock();
     const ha = mutable_table.getConst(a_handle) orelse {
         api_mutex.unlock();
@@ -630,7 +672,7 @@ export fn fst_compose(a_handle: u32, b_handle: u32) callconv(.c) u32 {
     return h;
 }
 
-export fn fst_compose_frozen(a_handle: u32, b_handle: u32) callconv(.c) u32 {
+export fn fst_compose_frozen(a_handle: Handle, b_handle: Handle) callconv(.c) Handle {
     const trace = isComposeTraceEnabled();
     const t0: i128 = if (trace) traceNowNs() else 0;
 
@@ -699,7 +741,7 @@ export fn fst_compose_frozen(a_handle: u32, b_handle: u32) callconv(.c) u32 {
     return h;
 }
 
-export fn fst_compose_frozen_shortest_path(a_handle: u32, b_handle: u32, n: u32) callconv(.c) u32 {
+export fn fst_compose_frozen_shortest_path(a_handle: Handle, b_handle: Handle, n: u32) callconv(.c) Handle {
     const trace = isComposeTraceEnabled();
     const t0: i128 = if (trace) traceNowNs() else 0;
 
@@ -768,7 +810,7 @@ export fn fst_compose_frozen_shortest_path(a_handle: u32, b_handle: u32, n: u32)
     return h;
 }
 
-export fn fst_determinize(handle: u32) callconv(.c) u32 {
+export fn fst_determinize(handle: Handle) callconv(.c) Handle {
     api_mutex.lock();
     const h = mutable_table.getConst(handle) orelse {
         api_mutex.unlock();
@@ -789,7 +831,7 @@ export fn fst_determinize(handle: u32) callconv(.c) u32 {
     return rh;
 }
 
-export fn fst_minimize(handle: u32) callconv(.c) FstError {
+export fn fst_minimize(handle: Handle) callconv(.c) FstError {
     api_mutex.lock();
     const h = mutable_table.getConst(handle) orelse {
         api_mutex.unlock();
@@ -831,7 +873,7 @@ export fn fst_minimize(handle: u32) callconv(.c) FstError {
     return .ok;
 }
 
-export fn fst_rm_epsilon(handle: u32) callconv(.c) u32 {
+export fn fst_rm_epsilon(handle: Handle) callconv(.c) Handle {
     api_mutex.lock();
     const h = mutable_table.getConst(handle) orelse {
         api_mutex.unlock();
@@ -852,7 +894,7 @@ export fn fst_rm_epsilon(handle: u32) callconv(.c) u32 {
     return rh;
 }
 
-export fn fst_shortest_path(handle: u32, n: u32) callconv(.c) u32 {
+export fn fst_shortest_path(handle: Handle, n: u32) callconv(.c) Handle {
     api_mutex.lock();
     const h = mutable_table.getConst(handle) orelse {
         api_mutex.unlock();
@@ -873,7 +915,7 @@ export fn fst_shortest_path(handle: u32, n: u32) callconv(.c) u32 {
     return rh;
 }
 
-export fn fst_union(a_handle: u32, b_handle: u32) callconv(.c) FstError {
+export fn fst_union(a_handle: Handle, b_handle: Handle) callconv(.c) FstError {
     api_mutex.lock();
     const ha = mutable_table.getConst(a_handle) orelse {
         api_mutex.unlock();
@@ -926,7 +968,7 @@ export fn fst_union(a_handle: u32, b_handle: u32) callconv(.c) FstError {
     return .ok;
 }
 
-export fn fst_concat(a_handle: u32, b_handle: u32) callconv(.c) FstError {
+export fn fst_concat(a_handle: Handle, b_handle: Handle) callconv(.c) FstError {
     api_mutex.lock();
     const ha = mutable_table.getConst(a_handle) orelse {
         api_mutex.unlock();
@@ -979,7 +1021,7 @@ export fn fst_concat(a_handle: u32, b_handle: u32) callconv(.c) FstError {
     return .ok;
 }
 
-export fn fst_closure(handle: u32, closure_type: c_int) callconv(.c) FstError {
+export fn fst_closure(handle: Handle, closure_type: c_int) callconv(.c) FstError {
     const ct: closure_mod.ClosureType = switch (closure_type) {
         0 => .star,
         1 => .plus,
@@ -1028,7 +1070,7 @@ export fn fst_closure(handle: u32, closure_type: c_int) callconv(.c) FstError {
     return .ok;
 }
 
-export fn fst_invert(handle: u32) callconv(.c) void {
+export fn fst_invert(handle: Handle) callconv(.c) void {
     api_mutex.lock();
     const h = mutable_table.getConst(handle) orelse {
         api_mutex.unlock();
@@ -1069,7 +1111,7 @@ export fn fst_invert(handle: u32) callconv(.c) void {
     old.deinit();
 }
 
-export fn fst_optimize(handle: u32) callconv(.c) u32 {
+export fn fst_optimize(handle: Handle) callconv(.c) Handle {
     api_mutex.lock();
     const h = mutable_table.getConst(handle) orelse {
         api_mutex.unlock();
@@ -1090,7 +1132,7 @@ export fn fst_optimize(handle: u32) callconv(.c) u32 {
     return rh;
 }
 
-export fn fst_cdrewrite(tau_h: u32, lambda_h: u32, rho_h: u32, sigma_h: u32) callconv(.c) u32 {
+export fn fst_cdrewrite(tau_h: Handle, lambda_h: Handle, rho_h: Handle, sigma_h: Handle) callconv(.c) Handle {
     api_mutex.lock();
     const t = mutable_table.getConst(tau_h) orelse {
         api_mutex.unlock();
@@ -1150,7 +1192,7 @@ export fn fst_cdrewrite(tau_h: u32, lambda_h: u32, rho_h: u32, sigma_h: u32) cal
     return rh;
 }
 
-export fn fst_difference(a_handle: u32, b_handle: u32) callconv(.c) u32 {
+export fn fst_difference(a_handle: Handle, b_handle: Handle) callconv(.c) Handle {
     api_mutex.lock();
     const ha = mutable_table.getConst(a_handle) orelse {
         api_mutex.unlock();
@@ -1182,7 +1224,7 @@ export fn fst_difference(a_handle: u32, b_handle: u32) callconv(.c) u32 {
     return h;
 }
 
-export fn fst_replace(root_handle: u32, labels: ?[*]const u32, fst_handles: ?[*]const u32, num_pairs: u32) callconv(.c) u32 {
+export fn fst_replace(root_handle: Handle, labels: ?[*]const u32, fst_handles: ?[*]const Handle, num_pairs: u32) callconv(.c) Handle {
     const lbl_ptr = labels orelse return invalid_handle;
     const fst_ptr = fst_handles orelse return invalid_handle;
 
@@ -1191,7 +1233,7 @@ export fn fst_replace(root_handle: u32, labels: ?[*]const u32, fst_handles: ?[*]
     const arena = arena_state.allocator();
 
     const labels_copy = arena.dupe(u32, lbl_ptr[0..num_pairs]) catch return invalid_handle;
-    const handles_copy = arena.dupe(u32, fst_ptr[0..num_pairs]) catch return invalid_handle;
+    const handles_copy = arena.dupe(Handle, fst_ptr[0..num_pairs]) catch return invalid_handle;
 
     const snapshots = alloc.alloc(MutableFst, num_pairs) catch return invalid_handle;
     defer alloc.free(snapshots);
@@ -1240,7 +1282,7 @@ export fn fst_replace(root_handle: u32, labels: ?[*]const u32, fst_handles: ?[*]
     return h;
 }
 
-export fn fst_project(handle: u32, side: c_int) callconv(.c) void {
+export fn fst_project(handle: Handle, side: c_int) callconv(.c) void {
     const pt: project_mod.ProjectType = switch (side) {
         0 => .input,
         1 => .output,
@@ -1289,7 +1331,7 @@ export fn fst_project(handle: u32, side: c_int) callconv(.c) void {
 
 // ── String utilities ──
 
-export fn fst_compile_string(input: ?[*]const u8, len: u32) callconv(.c) u32 {
+export fn fst_compile_string(input: ?[*]const u8, len: u32) callconv(.c) Handle {
     api_mutex.lock();
     defer api_mutex.unlock();
     const i = input orelse return invalid_handle;
@@ -1299,7 +1341,7 @@ export fn fst_compile_string(input: ?[*]const u8, len: u32) callconv(.c) u32 {
     return h;
 }
 
-export fn fst_print_string(handle: u32, buf: ?[*]u8, buf_len: u32) callconv(.c) i32 {
+export fn fst_print_string(handle: Handle, buf: ?[*]u8, buf_len: u32) callconv(.c) i32 {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = mutable_table.getConst(handle) orelse return -1;
@@ -1314,7 +1356,7 @@ export fn fst_print_string(handle: u32, buf: ?[*]u8, buf_len: u32) callconv(.c) 
     return @intCast(s.len);
 }
 
-export fn fst_print_output_string(handle: u32, buf: ?[*]u8, buf_len: u32) callconv(.c) i32 {
+export fn fst_print_output_string(handle: Handle, buf: ?[*]u8, buf_len: u32) callconv(.c) i32 {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = mutable_table.getConst(handle) orelse return -1;
@@ -1331,21 +1373,21 @@ export fn fst_print_output_string(handle: u32, buf: ?[*]u8, buf_len: u32) callco
 
 // ── Mutable query (for C consumers) ──
 
-export fn fst_mutable_start(handle: u32) callconv(.c) u32 {
+export fn fst_mutable_start(handle: Handle) callconv(.c) u32 {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = mutable_table.getConst(handle) orelse return no_state;
     return h.start();
 }
 
-export fn fst_mutable_num_states(handle: u32) callconv(.c) u32 {
+export fn fst_mutable_num_states(handle: Handle) callconv(.c) u32 {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = mutable_table.getConst(handle) orelse return 0;
     return @intCast(h.numStates());
 }
 
-export fn fst_mutable_num_arcs(handle: u32, state: u32) callconv(.c) u32 {
+export fn fst_mutable_num_arcs(handle: Handle, state: u32) callconv(.c) u32 {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = mutable_table.getConst(handle) orelse return 0;
@@ -1353,7 +1395,7 @@ export fn fst_mutable_num_arcs(handle: u32, state: u32) callconv(.c) u32 {
     return @intCast(h.numArcs(state));
 }
 
-export fn fst_mutable_final_weight(handle: u32, state: u32) callconv(.c) f64 {
+export fn fst_mutable_final_weight(handle: Handle, state: u32) callconv(.c) f64 {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = mutable_table.getConst(handle) orelse return std.math.inf(f64);
@@ -1361,7 +1403,7 @@ export fn fst_mutable_final_weight(handle: u32, state: u32) callconv(.c) f64 {
     return h.finalWeight(state).value;
 }
 
-export fn fst_mutable_get_arcs(handle: u32, state: u32, buf: ?[*]CFstArc, buf_len: u32) callconv(.c) u32 {
+export fn fst_mutable_get_arcs(handle: Handle, state: u32, buf: ?[*]CFstArc, buf_len: u32) callconv(.c) u32 {
     api_mutex.lock();
     defer api_mutex.unlock();
     const h = mutable_table.getConst(handle) orelse return 0;
@@ -1379,4 +1421,17 @@ export fn fst_mutable_get_arcs(handle: u32, state: u32, buf: ?[*]CFstArc, buf_le
         }
     }
     return count;
+}
+
+test "c-api: freed handle cannot access reused slot" {
+    const first = fst_mutable_new();
+    try std.testing.expect(first != invalid_handle);
+    fst_mutable_free(first);
+
+    const second = fst_mutable_new();
+    defer fst_mutable_free(second);
+    try std.testing.expect(second != invalid_handle);
+    try std.testing.expect(first != second);
+    try std.testing.expectEqual(no_state, fst_mutable_add_state(first));
+    try std.testing.expectEqual(@as(u32, 0), fst_mutable_add_state(second));
 }

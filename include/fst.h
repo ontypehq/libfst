@@ -25,10 +25,10 @@ extern "C" {
  *   - Fst (frozen) queries are fully reentrant and thread-safe.
  */
 
-/* Handle types — opaque u32 indices into internal tables.
- * Prevents double-free, use-after-free, and type confusion. */
-typedef uint32_t FstMutableHandle;
-typedef uint32_t FstHandle;
+/* Handle types — opaque generation-tagged indices into internal tables.
+ * Prevents double-free, stale-handle reuse, and type confusion. */
+typedef uint64_t FstMutableHandle;
+typedef uint64_t FstHandle;
 
 /* Error codes */
 typedef enum {
@@ -57,7 +57,7 @@ typedef struct {
 /* Sentinel values */
 #define FST_NO_STATE UINT32_MAX
 #define FST_EPSILON 0
-#define FST_INVALID_HANDLE UINT32_MAX
+#define FST_INVALID_HANDLE UINT64_MAX
 
 /* --- MutableFst lifecycle --- */
 FstMutableHandle fst_mutable_new(void);

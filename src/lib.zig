@@ -56,6 +56,7 @@ test {
     _ = char_class;
     _ = io_text;
     _ = io_binary;
+    _ = c_api;
     _ = ops.union_;
     _ = ops.concat;
     _ = ops.closure;

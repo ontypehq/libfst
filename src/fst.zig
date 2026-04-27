@@ -231,15 +231,39 @@ pub fn Fst(comptime W: type) type {
             if (hdr.version != VERSION) return error.UnsupportedVersion;
             if (hdr.weight_type != weightTypeId(W)) return error.WeightTypeMismatch;
 
-            // Validate buffer size matches declared num_states/num_arcs
+            // Validate buffer size matches declared num_states/num_arcs.
             const expected_size = @sizeOf(Header) +
                 @as(usize, hdr.num_states) * @sizeOf(StateEntry) +
                 @as(usize, hdr.num_arcs) * @sizeOf(PackedArc);
-            if (bytes.len < expected_size) return error.InvalidFormat;
+            if (bytes.len != expected_size) return error.InvalidFormat;
 
             // Validate start state
             if (hdr.num_states > 0 and hdr.start_state != no_state and
                 hdr.start_state >= hdr.num_states) return error.InvalidFormat;
+            if (hdr.num_states == 0 and hdr.start_state != no_state) return error.InvalidFormat;
+
+            const state_offset = @sizeOf(Header);
+            const states_ptr: [*]const StateEntry = @ptrCast(@alignCast(bytes.ptr + state_offset));
+            const states = states_ptr[0..hdr.num_states];
+
+            const arc_offset = @sizeOf(Header) + @as(usize, hdr.num_states) * @sizeOf(StateEntry);
+            const arcs_ptr: [*]const PackedArc = @ptrCast(@alignCast(bytes.ptr + arc_offset));
+            const all_arcs = arcs_ptr[0..hdr.num_arcs];
+
+            for (states) |entry| {
+                if (entry.arc_offset > hdr.num_arcs) return error.InvalidFormat;
+                if (entry.num_arcs > hdr.num_arcs - entry.arc_offset) return error.InvalidFormat;
+
+                const state_arcs = all_arcs[entry.arc_offset..][0..entry.num_arcs];
+                var last_ilabel: ?Label = null;
+                for (state_arcs) |a| {
+                    if (a.nextstate >= hdr.num_states) return error.InvalidFormat;
+                    if (last_ilabel) |prev| {
+                        if (a.ilabel < prev) return error.InvalidFormat;
+                    }
+                    last_ilabel = a.ilabel;
+                }
+            }
 
             return .{
                 .bytes = bytes,
@@ -383,4 +407,86 @@ test "fst: fromBytes roundtrip" {
         0.001,
     );
     _ = &frozen2;
+}
+
+fn expectInvalidFrozenBytes(comptime W: type, allocator: Allocator, frozen: *const Fst(W), mutate: anytype) !void {
+    const bytes = try allocator.alignedAlloc(u8, .@"8", frozen.bytes.len);
+    defer allocator.free(bytes);
+    @memcpy(bytes, frozen.bytes);
+    mutate(bytes);
+    try std.testing.expectError(error.InvalidFormat, Fst(W).fromBytes(bytes));
+}
+
+test "fst: fromBytes rejects invalid arc range" {
+    const W = weight_mod.TropicalWeight;
+    const A = arc_mod.Arc(W);
+    const allocator = std.testing.allocator;
+
+    var mfst = mutable_fst_mod.MutableFst(W).init(allocator);
+    defer mfst.deinit();
+    _ = try mfst.addState();
+    _ = try mfst.addState();
+    mfst.setStart(0);
+    try mfst.addArc(0, A.init(1, 1, W.one, 1));
+
+    var frozen = try Fst(W).fromMutable(allocator, &mfst);
+    defer frozen.deinit();
+
+    try expectInvalidFrozenBytes(W, allocator, &frozen, struct {
+        fn mutate(bytes: []align(8) u8) void {
+            const states: [*]StateEntry = @ptrCast(@alignCast(bytes.ptr + @sizeOf(Header)));
+            states[0].arc_offset = 1;
+            states[0].num_arcs = 1;
+        }
+    }.mutate);
+}
+
+test "fst: fromBytes rejects invalid arc target" {
+    const W = weight_mod.TropicalWeight;
+    const A = arc_mod.Arc(W);
+    const allocator = std.testing.allocator;
+
+    var mfst = mutable_fst_mod.MutableFst(W).init(allocator);
+    defer mfst.deinit();
+    _ = try mfst.addState();
+    _ = try mfst.addState();
+    mfst.setStart(0);
+    try mfst.addArc(0, A.init(1, 1, W.one, 1));
+
+    var frozen = try Fst(W).fromMutable(allocator, &mfst);
+    defer frozen.deinit();
+
+    try expectInvalidFrozenBytes(W, allocator, &frozen, struct {
+        fn mutate(bytes: []align(8) u8) void {
+            const arc_base = @sizeOf(Header) + 2 * @sizeOf(StateEntry);
+            const arcs: [*]PackedArc = @ptrCast(@alignCast(bytes.ptr + arc_base));
+            arcs[0].nextstate = 99;
+        }
+    }.mutate);
+}
+
+test "fst: fromBytes rejects unsorted frozen arcs" {
+    const W = weight_mod.TropicalWeight;
+    const A = arc_mod.Arc(W);
+    const allocator = std.testing.allocator;
+
+    var mfst = mutable_fst_mod.MutableFst(W).init(allocator);
+    defer mfst.deinit();
+    _ = try mfst.addState();
+    _ = try mfst.addState();
+    mfst.setStart(0);
+    try mfst.addArc(0, A.init(1, 1, W.one, 1));
+    try mfst.addArc(0, A.init(2, 2, W.one, 1));
+
+    var frozen = try Fst(W).fromMutable(allocator, &mfst);
+    defer frozen.deinit();
+
+    try expectInvalidFrozenBytes(W, allocator, &frozen, struct {
+        fn mutate(bytes: []align(8) u8) void {
+            const arc_base = @sizeOf(Header) + 2 * @sizeOf(StateEntry);
+            const arcs: [*]PackedArc = @ptrCast(@alignCast(bytes.ptr + arc_base));
+            arcs[0].ilabel = 2;
+            arcs[1].ilabel = 1;
+        }
+    }.mutate);
 }

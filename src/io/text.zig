@@ -30,7 +30,7 @@ pub fn readText(comptime W: type, allocator: Allocator, input: []const u8) !muta
 
         var fields = std.mem.tokenizeAny(u8, line, " \t");
         const first = fields.next() orelse continue;
-        const src = std.fmt.parseInt(StateId, first, 10) catch continue;
+        const src = std.fmt.parseInt(StateId, first, 10) catch return error.InvalidFormat;
 
         // Ensure state exists
         while (fst.numStates() <= src) {
@@ -51,7 +51,8 @@ pub fn readText(comptime W: type, allocator: Allocator, input: []const u8) !muta
         // Try parsing second field as a state ID
         const maybe_dest = std.fmt.parseInt(StateId, second, 10) catch {
             // If it fails, treat as weight for final state
-            const w = parseWeight(W, second) catch W.one;
+            const w = parseWeight(W, second) catch return error.InvalidFormat;
+            if (fields.next() != null) return error.InvalidFormat;
             fst.setFinal(src, w);
             continue;
         };
@@ -79,10 +80,11 @@ pub fn readText(comptime W: type, allocator: Allocator, input: []const u8) !muta
             _ = try fst.addState();
         }
 
-        const ilabel = try std.fmt.parseInt(Label, third, 10);
+        const ilabel = std.fmt.parseInt(Label, third, 10) catch return error.InvalidFormat;
 
         const fourth = fields.next();
         const fifth = fields.next();
+        if (fields.next() != null) return error.InvalidFormat;
 
         var olabel = ilabel;
         var w = W.one;
@@ -91,13 +93,13 @@ pub fn readText(comptime W: type, allocator: Allocator, input: []const u8) !muta
             olabel = std.fmt.parseInt(Label, f4, 10) catch {
                 // fourth is weight, olabel = ilabel
                 olabel = ilabel;
-                w = parseWeight(W, f4) catch W.one;
+                w = parseWeight(W, f4) catch return error.InvalidFormat;
                 try fst.addArc(src, A.init(ilabel, olabel, w, dest));
                 continue;
             };
 
             if (fifth) |f5| {
-                w = parseWeight(W, f5) catch W.one;
+                w = parseWeight(W, f5) catch return error.InvalidFormat;
             }
         }
 
@@ -233,4 +235,14 @@ test "text: final state with weight" {
 
     try std.testing.expect(fst.isFinal(1));
     try std.testing.expectApproxEqAbs(@as(f64, 2.5), fst.finalWeight(1).value, 0.001);
+}
+
+test "text: rejects malformed lines" {
+    const W = @import("../weight.zig").TropicalWeight;
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectError(error.InvalidFormat, readText(W, allocator, "not-a-state\n"));
+    try std.testing.expectError(error.InvalidFormat, readText(W, allocator, "0\t1\tbad-label\n"));
+    try std.testing.expectError(error.InvalidFormat, readText(W, allocator, "0\t1\t1\tbad-weight\n"));
+    try std.testing.expectError(error.InvalidFormat, readText(W, allocator, "0\t1\t1\t1\t0.5\textra\n"));
 }
