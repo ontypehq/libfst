@@ -1,0 +1,56 @@
+name: Release macOS Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create or update
+        required: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build macOS libfst artifacts
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Install Zig
+        run: brew install zig
+
+      - name: Build package
+        run: ./scripts/package-macos.sh dist
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: libfst-macos
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$(git rev-parse --short=12 HEAD)}"
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "Prebuilt libfst macOS artifacts."
+            echo
+            echo "Includes static arm64/x86_64 archives, arm64 dylib for ITN export, headers, and manifest."
+          } > "$notes_file"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$tag" --notes-file "$notes_file"
+          fi
+          gh release upload "$tag" dist/* --clobber
+

@@ -1,5 +1,6 @@
 .zig-cache/
 zig-out/
+.scratch/
 .agentspace/
 .env
 .agents/
